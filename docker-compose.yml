@@ -8,8 +8,8 @@ services:          # ← FALTA ESTA LÍNEA
     ports:
       - "8000:8000"
     environment:
-      OPEN_API_KEY: ${OPEN_API_KEY}
-      OPEN_API_MODEL: ${OPEN_API_MODEL}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_API_MODEL: ${OPENAI_API_MODEL}
       ANTHROPIC_KEY: ${ANTHROPIC_KEY}
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL}
       DB_HOST: ${POSTGRES_HOST}

@@ -12,3 +12,4 @@ pydantic>=2.0.0
 
 streamlit
 psycopg2-binary
+anthropic 

@@ -1,23 +1,23 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 from qdrant_client import QdrantClient
+from anthropic import Anthropic
 from openai import OpenAI
 import psycopg2
 import uuid
 import os
+import logging
+
+
 
 app = FastAPI()
+log = logging.getLogger("uvicorn.error")
 
-oa = OpenAI(
-    api_key=os.getenv("ANTHROPIC_KEY"),
-    base_url="https://api.anthropic.com"
-)
+# Cliente principal: Anthropic
+anthropic_client = Anthropic(api_key=os.getenv("ANTHROPIC_KEY"))
 
-# Cliente OpenAI para embeddings
-oa_embeddings = OpenAI(
-    api_key=os.getenv("OPEN_API_KEY")
-)
-
+# Cliente fallback: OpenAI (también usado para embeddings)
+openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 qdrant = QdrantClient(url="http://n8n_qdrant:6333")
 
@@ -85,8 +85,7 @@ def load_history(session_id: str, user_id: str) -> list:
     return [{"role": role_map.get(r[0], r[0]), "content": r[1]} for r in rows]
 
 def search_cvs(query: str, limit: int = 5) -> str:
-    # resp = oa.embeddings.create(input=query, model="text-embedding-3-small")
-    resp = oa_embeddings.embeddings.create(input=query, model="text-embedding-3-small")
+    resp = openai_client.embeddings.create(input=query, model="text-embedding-3-small")
     vector = resp.data[0].embedding
     results = qdrant.query_points("cvs", query=vector, limit=limit, with_payload=True)
 
@@ -98,16 +97,43 @@ def search_cvs(query: str, limit: int = 5) -> str:
         context += f"\n--- Candidato: {nombre} (relevancia: {score:.2f}) ---\n{content}\n"
     return context
 
+def llm_complete(system_prompt: str, messages: list) -> str:
+    """Intenta Anthropic; si falla, cae a OpenAI."""
+    # 1) Anthropic
+    try:
+        # Anthropic separa system del array de messages
+        msgs = [m for m in messages if m["role"] != "system"]
+        resp = anthropic_client.messages.create(
+            model=os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5"),
+            max_tokens=1024,
+            system=system_prompt,
+            messages=msgs,
+            temperature=0.3,
+        )
+        return resp.content[0].text
+    except Exception as e:
+        log.warning(f"Anthropic falló, fallback OpenAI: {e}")
+
+    # 2) OpenAI
+    try:
+        resp = openai_client.chat.completions.create(
+            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+            messages=[{"role": "system", "content": system_prompt}] + messages,
+            temperature=0.3,
+        )
+        return resp.choices[0].message.content
+    except Exception as e:
+        log.error(f"OpenAI también falló: {e}")
+        raise
+
+
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
     sid = req.session_id or str(uuid.uuid4())
     uid = req.user_id
 
     ensure_session(sid, uid)
-
     history = load_history(sid, uid)
-
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
 
     cv_context = search_cvs(req.message)
     user_msg = req.message
@@ -116,20 +142,11 @@ def chat(req: ChatRequest):
 
     save_message(sid, uid, "human", req.message)
 
-    messages.append({"role": "user", "content": user_msg})
-
-    completion = oa.chat.completions.create(
-        model=os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001"),
-        messages=messages,
-        temperature=0.3
-    )
-
-    answer = completion.choices[0].message.content
+    messages = history + [{"role": "user", "content": user_msg}]
+    answer = llm_complete(SYSTEM_PROMPT, messages)
 
     save_message(sid, uid, "ai", answer)
-
     return ChatResponse(response=answer, session_id=sid)
-
 @app.get("/history/{session_id}")
 def history(session_id: str, user_id: str = "1"):
     msgs = load_history(session_id, user_id)
@@ -138,3 +155,58 @@ def history(session_id: str, user_id: str = "1"):
 @app.get("/health")
 def health():
     return {"status": "ok"}
+# app = FastAPI()
+
+# oa = OpenAI(
+#     api_key=os.getenv("ANTHROPIC_KEY"),
+#     base_url="https://api.anthropic.com"
+# )
+# oa = Anthropic(api_key=os.getenv("ANTHROPIC_KEY"))
+# # Cliente OpenAI para embeddings
+# oa_embeddings = OpenAI(
+#     api_key=os.getenv("OPEN_API_KEY")
+# )
+
+
+# qdrant = QdrantClient(url="http://n8n_qdrant:6333")
+
+# @app.post("/chat", response_model=ChatResponse)
+# def chat(req: ChatRequest):
+#     sid = req.session_id or str(uuid.uuid4())
+#     uid = req.user_id
+
+#     ensure_session(sid, uid)
+
+#     history = load_history(sid, uid)
+
+#     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
+
+#     cv_context = search_cvs(req.message)
+#     user_msg = req.message
+#     if cv_context.strip():
+#         user_msg += f"\n\n[CONTEXTO DE CVs ENCONTRADOS EN LA BASE DE DATOS]:\n{cv_context}"
+
+#     save_message(sid, uid, "human", req.message)
+
+#     messages.append({"role": "user", "content": user_msg})
+
+#     completion = oa.chat.completions.create(
+#         model=os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001"),
+#         messages=messages,
+#         temperature=0.3
+#     )
+
+#     answer = completion.choices[0].message.content
+
+#     save_message(sid, uid, "ai", answer)
+
+#     return ChatResponse(response=answer, session_id=sid)
+
+# @app.get("/history/{session_id}")
+# def history(session_id: str, user_id: str = "1"):
+#     msgs = load_history(session_id, user_id)
+#     return {"history": msgs}
+
+# @app.get("/health")
+# def health():
+#     return {"status": "ok"}
