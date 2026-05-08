@@ -1,0 +1,84 @@
+from typing import Literal
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from app.config import config
+from app.prompts import SYSTEM_PROMPT, ROUTER_PROMPT
+from app.tools import build_retriever_tool
+from app.graph_state import AgentState
+
+# Instancias globales — se crean una vez al iniciar el contenedor
+llm = ChatOpenAI(
+    model=config.MODEL_NAME,
+    api_key=config.OPENAI_API_KEY,
+    temperature=0,
+)
+
+retriever_tool = build_retriever_tool()
+
+
+def router_node(state: AgentState) -> AgentState:
+    user_message = state["messages"][-1].content
+    prompt = ROUTER_PROMPT.format(message=user_message)
+    response = llm.invoke([HumanMessage(content=prompt)])
+    intent = response.content.strip().lower()
+
+    if intent not in ["search", "ranking", "off_topic"]:
+        intent = "search"
+
+    return {**state, "intent": intent, "user_message": user_message}
+
+
+def off_topic_node(state: AgentState) -> AgentState:
+    response = AIMessage(
+        content="La consulta no corresponde a una búsqueda de "
+                "perfiles en la base de datos."
+    )
+    return {
+        **state,
+        "messages": state["messages"] + [response],
+        "final_response": response.content,
+    }
+
+
+def rag_search_node(state: AgentState) -> AgentState:
+    docs = retriever_tool.func(state["user_message"])
+    return {**state, "retrieved_docs": docs}
+
+
+def response_node(state: AgentState) -> AgentState:
+    intent = state.get("intent", "search")
+    ranking_instruction = (
+        "Aplicá ranking por: años de experiencia en marketing, "
+        "especialización, seniority y estabilidad laboral."
+        if intent == "ranking" else ""
+    )
+
+    context_prompt = (
+        f"## Documentos encontrados en la base de datos:\n"
+        f"{state.get('retrieved_docs', '')}\n\n"
+        f"## Tipo de consulta identificada: {intent}\n\n"
+        f"## Consulta del usuario:\n{state['user_message']}\n\n"
+        f"Respondé basándote ÚNICAMENTE en los documentos proporcionados.\n"
+        f"{ranking_instruction}"
+    )
+
+    messages = [
+        SystemMessage(content=SYSTEM_PROMPT),
+        *state["messages"][:-1],
+        HumanMessage(content=context_prompt),
+    ]
+
+    response = llm.invoke(messages)
+
+    return {
+        **state,
+        "messages": state["messages"] + [response],
+        "final_response": response.content,
+    }
+
+
+def route_after_classification(
+    state: AgentState,
+) -> Literal["rag_search", "off_topic"]:
+    return "off_topic" if state.get("intent") == "off_topic" else "rag_search"
+
