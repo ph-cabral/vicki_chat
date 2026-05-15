@@ -2,7 +2,7 @@ from langchain_qdrant import QdrantVectorStore
 from langchain_openai import OpenAIEmbeddings
 from langchain_core.tools.retriever import create_retriever_tool
 from qdrant_client import QdrantClient
-from app.config import config
+from config import config
 import requests
 from requests.auth import HTTPDigestAuth
 import base64

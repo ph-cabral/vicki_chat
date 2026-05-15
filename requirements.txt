@@ -11,6 +11,7 @@ qdrant-client>=1.11.0
 pydantic>=2.0.0
 asyncpg>=0.29.0
 
+sqlalchemy
 streamlit
 psycopg2-binary
 anthropic

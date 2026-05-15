@@ -7,7 +7,6 @@ load_dotenv()
 class Config:
     ANTHROPIC_KEY: str = os.getenv("ANTHROPIC_KEY", "")
     ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
-    OPENAI_API_KEY: str = os.getenv("OPEN_API_KEY", "")
     QDRANT_URL: str = os.getenv("QDRANT_URL", "http://n8n_qdrant:6333")
     QDRANT_API_KEY: str = os.getenv("QDRANT_API_KEY", "")
     QDRANT_COLLECTION: str = os.getenv("QDRANT_COLLECTION", "cvs")
@@ -16,6 +15,7 @@ class Config:
     CONTEXT_WINDOW: int = int(os.getenv("CONTEXT_WINDOW", "30"))
     CORS_ORIGINS: list = os.getenv("CORS", "*").split(",")
     TZ: str = os.getenv("TZ", "America/Argentina/Buenos_Aires")
+    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     DATABASE_URL: str = os.getenv(
         "DATABASE_URL", 
         "postgresql://n8n:3v3rW3ar@n8n_sql:5432/n8n"

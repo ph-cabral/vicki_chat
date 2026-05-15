@@ -1,7 +1,7 @@
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-from app.memory import save_message, get_history
-from app.config import config
+from memory import save_message, get_history
+from config import config
 
 
 llm = ChatOpenAI(
