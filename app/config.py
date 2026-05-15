@@ -1,9 +1,12 @@
 from dotenv import load_dotenv
 import os
 
+
 load_dotenv()
 
 class Config:
+    ANTHROPIC_KEY: str = os.getenv("ANTHROPIC_KEY", "")
+    ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
     OPENAI_API_KEY: str = os.getenv("OPEN_API_KEY", "")
     QDRANT_URL: str = os.getenv("QDRANT_URL", "http://n8n_qdrant:6333")
     QDRANT_API_KEY: str = os.getenv("QDRANT_API_KEY", "")

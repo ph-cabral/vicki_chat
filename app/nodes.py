@@ -6,9 +6,9 @@ from app.prompts import SYSTEM_PROMPT, ROUTER_PROMPT
 from app.tools import build_retriever_tool
 from app.graph_state import AgentState
 from app.tools import take_camera_snapshot
-
+from langchain_anthropic import ChatAnthropic
 # Instancias globales — se crean una vez al iniciar el contenedor
-llm = ChatOpenAI(
+llm = ChatAnthropic(
     model=config.ANTHROPIC_MODEL,
     api_key=config.ANTHROPIC_KEY,
     base_url="https://api.anthropic.com/v1",

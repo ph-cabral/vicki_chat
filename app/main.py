@@ -29,7 +29,8 @@ db_pool = None
 @app.on_event("startup")
 async def startup():
     global db_pool
-    db_pool = await asyncpg.create_pool(config.database_url)
+    db_pool = await asyncpg.create_pool(config.DATABASE_URL)
+    # db_pool = await asyncpg.create_pool(config.database_url)
 
 
 @app.on_event("shutdown")
@@ -136,4 +137,6 @@ async def chat(request: ChatRequest):
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "chat-cv-agent"}
+
+
 

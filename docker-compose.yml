@@ -1,8 +1,8 @@
 services:          # ← FALTA ESTA LÍNEA
   chat-agent:
     build:
-      context: ./app
-      dockerfile: Dockerfile.api
+      context: .
+      dockerfile: app/Dockerfile.api
     container_name: n8n_chat_agent
     restart: unless-stopped
     ports:
