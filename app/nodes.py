@@ -5,28 +5,41 @@ from app.config import config
 from app.prompts import SYSTEM_PROMPT, ROUTER_PROMPT
 from app.tools import build_retriever_tool
 from app.graph_state import AgentState
+from app.tools import take_camera_snapshot
 
 # Instancias globales — se crean una vez al iniciar el contenedor
 llm = ChatOpenAI(
-    model=config.MODEL_NAME,
-    api_key=config.OPENAI_API_KEY,
+    model=config.ANTHROPIC_MODEL,
+    api_key=config.ANTHROPIC_KEY,
+    base_url="https://api.anthropic.com/v1",
     temperature=0,
 )
 
 retriever_tool = build_retriever_tool()
 
 
+# def router_node(state: AgentState) -> AgentState:
+#     user_message = state["messages"][-1].content
+#     prompt = ROUTER_PROMPT.format(message=user_message)
+#     response = llm.invoke([HumanMessage(content=prompt)])
+#     intent = response.content.strip().lower()
+
+#     if intent not in ["search", "ranking", "off_topic"]:
+#         intent = "search"
+
+#     return {**state, "intent": intent, "user_message": user_message}
 def router_node(state: AgentState) -> AgentState:
     user_message = state["messages"][-1].content
     prompt = ROUTER_PROMPT.format(message=user_message)
     response = llm.invoke([HumanMessage(content=prompt)])
     intent = response.content.strip().lower()
-
-    if intent not in ["search", "ranking", "off_topic"]:
+    
+    print(f"[ROUTER] mensaje: {user_message} → intent: {intent}", flush=True)  # agregá esto
+    
+    if intent not in ["search", "ranking", "camera", "off_topic"]:
         intent = "search"
-
+    
     return {**state, "intent": intent, "user_message": user_message}
-
 
 def off_topic_node(state: AgentState) -> AgentState:
     response = AIMessage(
@@ -77,8 +90,27 @@ def response_node(state: AgentState) -> AgentState:
     }
 
 
-def route_after_classification(
-    state: AgentState,
-) -> Literal["rag_search", "off_topic"]:
-    return "off_topic" if state.get("intent") == "off_topic" else "rag_search"
+# def route_after_classification(
+#     state: AgentState,
+# ) -> Literal["rag_search", "off_topic"]:
+#     return "off_topic" if state.get("intent") == "off_topic" else "rag_search"
 
+def route_after_classification(state) -> Literal["rag_search", "off_topic", "camera"]:
+    intent = state.get("intent", "search")
+    if intent == "off_topic":
+        return "off_topic"
+    if intent == "camera":
+        return "camera"
+    return "rag_search"
+
+def camera_node(state: AgentState) -> AgentState:
+    try:
+        img_b64 = take_camera_snapshot()
+        response = AIMessage(content=f"__CAMERA_SNAPSHOT__{img_b64}")
+    except Exception as e:
+        response = AIMessage(content=f"No pude acceder a la cámara: {e}")
+    return {
+        **state,
+        "messages": state["messages"] + [response],
+        "final_response": response.content,
+    }
