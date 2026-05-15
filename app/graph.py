@@ -7,7 +7,6 @@ from app.nodes import (
     response_node,
     camera_node,
 )
-from app.memory import build_checkpointer
 
 
 def route_after_classification(state):
@@ -21,23 +20,18 @@ def route_after_classification(state):
 
 def build_graph():
     builder = StateGraph(AgentState)
-
     builder.add_node("router", router_node)
     builder.add_node("off_topic", off_topic_node)
     builder.add_node("rag_search", rag_search_node)
     builder.add_node("response", response_node)
-    builder.add_node("camera", camera_node)
-
     builder.set_entry_point("router")
-
     builder.add_conditional_edges(
         "router",
         route_after_classification,
-        {"off_topic": "off_topic", "rag_search": "rag_search", "camera": "camera"},
+        {"off_topic": "off_topic", "rag_search": "rag_search"},
     )
-
     builder.add_edge("rag_search", "response")
     builder.add_edge("response", END)
     builder.add_edge("off_topic", END)
-    builder.add_edge("camera", END)
+    return builder   # ← devolver el builder, no compilar acá
 

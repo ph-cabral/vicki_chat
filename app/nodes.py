@@ -12,7 +12,6 @@ from app.prompts import SYSTEM_PROMPT, ROUTER_PROMPT
 llm = ChatAnthropic(
     model=config.ANTHROPIC_MODEL,
     api_key=config.ANTHROPIC_KEY,
-    base_url="https://api.anthropic.com/v1",
     temperature=0,
 )
 
