@@ -22,6 +22,7 @@ services:          # ← FALTA ESTA LÍNEA
       MODEL_NAME: gpt-4.1-mini
       TZ: ${TZ}
       CORS: ${CORS}
+      PUBLIC_BASE_URL: http://10.10.0.159:8000
     networks:
       - ai-net
     healthcheck:
@@ -29,6 +30,8 @@ services:          # ← FALTA ESTA LÍNEA
       interval: 10s
       timeout: 5s
       retries: 5
+    volumes:
+      - ./snapshots:/code/snapshots
 
   chat-frontend:
     build: .

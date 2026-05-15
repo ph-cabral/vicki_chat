@@ -8,14 +8,23 @@ from langchain_core.messages import HumanMessage, AIMessage
 from app.graph import build_graph
 from app.config import config
 from app.memory import build_checkpointer
-
+from fastapi.responses import FileResponse
+from app.tools import SNAPSHOT_PATH
 import traceback
+
+from fastapi.staticfiles import StaticFiles
+import os
+
 
 app = FastAPI(
     title="Chat CV Agent",
     description="Agente de selección de personal — Basdonax AI",
     version="1.0.0",
 )
+
+
+os.makedirs("/code/snapshots", exist_ok=True)
+app.mount("/snapshots", StaticFiles(directory="/code/snapshots"), name="snapshots")
 
 app.add_middleware(
     CORSMiddleware,
@@ -29,7 +38,10 @@ app.add_middleware(
 graph = None
 db_pool = None
 
-
+@app.get("/snapshot")
+def snapshot():
+    return FileResponse(SNAPSHOT_PATH, media_type="image/jpeg")
+ 
 @app.on_event("startup")
 async def startup():
     global db_pool, graph

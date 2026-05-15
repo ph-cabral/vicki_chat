@@ -6,11 +6,16 @@ from app.config import config
 import requests
 from requests.auth import HTTPDigestAuth
 import base64
+import subprocess, base64, tempfile, os, time
 
 
 CAMERA_IP = "10.10.0.30"
 CAMERA_USER = "admin"
 CAMERA_PASS = "161982br"
+SNAPSHOT_PATH = "/code/snapshots/latest.jpg"
+SNAPSHOT_DIR = "/code/snapshots"
+PUBLIC_BASE = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000")
+
 
 def build_retriever_tool():
     embeddings = OpenAIEmbeddings(
@@ -44,8 +49,19 @@ def build_retriever_tool():
     )
 
 def take_camera_snapshot() -> str:
-    """Toma foto de la cámara IP y retorna base64."""
-    url = f"http://{CAMERA_IP}/ISAPI/Streaming/channels/101/picture"
-    r = requests.get(url, auth=HTTPDigestAuth(CAMERA_USER, CAMERA_PASS), timeout=5)
-    r.raise_for_status()
-    return base64.b64encode(r.content).decode()
+    os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+    fname = f"{int(time.time())}.jpg"
+    path = os.path.join(SNAPSHOT_DIR, fname)
+    rtsp = f"rtsp://{CAMERA_USER}:{CAMERA_PASS}@{CAMERA_IP}:554/Streaming/Channels/101"
+    subprocess.run(
+        ["ffmpeg", "-y", "-rtsp_transport", "tcp", "-i", rtsp,
+         "-frames:v", "1", "-update", "1", "-q:v", "2", path],
+        check=True, timeout=15, capture_output=True,
+    )
+    return f"{PUBLIC_BASE}/snapshots/{fname}"
+
+def get_snapshot_b64() -> str | None:
+    if not os.path.exists(SNAPSHOT_PATH):
+        return None
+    with open(SNAPSHOT_PATH, "rb") as f:
+        return base64.b64encode(f.read()).decode()
