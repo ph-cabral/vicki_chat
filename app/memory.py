@@ -1,6 +1,6 @@
 from sqlalchemy import create_engine, text
 from datetime import datetime
-from config import config
+from app.config import config
 
 engine = create_engine(config.DATABASE_URL)
 

@@ -1,12 +1,13 @@
 from typing import Literal
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
-from config import config
-from prompts import SYSTEM_PROMPT, ROUTER_PROMPT
-from tools import build_retriever_tool
-from graph_state import AgentState
-from tools import take_camera_snapshot
+from app.config import config
+from app.prompts import SYSTEM_PROMPT, ROUTER_PROMPT
+from app.tools import build_retriever_tool, take_camera_snapshot
+from app.graph_state import AgentState
 from langchain_anthropic import ChatAnthropic
+from app.config import config
+from app.prompts import SYSTEM_PROMPT, ROUTER_PROMPT
 # Instancias globales — se crean una vez al iniciar el contenedor
 llm = ChatAnthropic(
     model=config.ANTHROPIC_MODEL,
