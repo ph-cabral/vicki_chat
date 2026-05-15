@@ -7,6 +7,9 @@ import asyncpg
 from langchain_core.messages import HumanMessage, AIMessage
 from app.graph import build_graph
 from app.config import config
+from app.memory import build_checkpointer
+
+import traceback
 
 app = FastAPI(
     title="Chat CV Agent",
@@ -22,15 +25,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-graph = build_graph()
+# graph = build_graph()
+graph = None
 db_pool = None
 
 
 @app.on_event("startup")
 async def startup():
-    global db_pool
+    global db_pool, graph
     db_pool = await asyncpg.create_pool(config.DATABASE_URL)
-    # db_pool = await asyncpg.create_pool(config.database_url)
+    cp = await build_checkpointer()
+    graph = build_graph().compile(checkpointer=cp)
 
 
 @app.on_event("shutdown")
@@ -141,8 +146,8 @@ async def chat(request: ChatRequest):
         )
 
     except Exception as e:
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
-
 
 
 @app.get("/health")

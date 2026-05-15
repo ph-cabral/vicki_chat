@@ -41,4 +41,3 @@ def build_graph():
     builder.add_edge("off_topic", END)
     builder.add_edge("camera", END)
 
-    return builder.compile(checkpointer=build_checkpointer())

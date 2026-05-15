@@ -2,7 +2,8 @@ from sqlalchemy import create_engine, text
 from datetime import datetime
 from app.config import config
 from langgraph.checkpoint.postgres import PostgresSaver
-from psycopg_pool import ConnectionPool
+from psycopg_pool import ConnectionPool, AsyncConnectionPool 
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 _checkpointer = None
 engine = create_engine(config.DATABASE_URL)
@@ -35,14 +36,16 @@ def get_history(session_id: str, user_id: str, limit: int = 20) -> list[dict]:
     return [{"role": r.role, "content": r.content} for r in reversed(rows)]
 
 
-def build_checkpointer():
+async def build_checkpointer():
     global _checkpointer
     if _checkpointer is None:
-        pool = ConnectionPool(
-            conninfo=config.DATABASE_URL,
+        pool = AsyncConnectionPool(
+            conninfo=config.DATABASE_URL.replace("postgresql+psycopg://", "postgresql://"),
             max_size=20,
             kwargs={"autocommit": True, "prepare_threshold": 0},
+            open=False,
         )
-        _checkpointer = PostgresSaver(pool)
-        _checkpointer.setup()
+        await pool.open()
+        _checkpointer = AsyncPostgresSaver(pool)
+        await _checkpointer.setup()
     return _checkpointer
