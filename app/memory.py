@@ -1,7 +1,10 @@
 from sqlalchemy import create_engine, text
 from datetime import datetime
 from app.config import config
+from langgraph.checkpoint.postgres import PostgresSaver
+from psycopg_pool import ConnectionPool
 
+_checkpointer = None
 engine = create_engine(config.DATABASE_URL)
 
 def ensure_session(session_id: str, user_id: str):
@@ -31,3 +34,15 @@ def get_history(session_id: str, user_id: str, limit: int = 20) -> list[dict]:
         rows = result.fetchall()
     return [{"role": r.role, "content": r.content} for r in reversed(rows)]
 
+
+def build_checkpointer():
+    global _checkpointer
+    if _checkpointer is None:
+        pool = ConnectionPool(
+            conninfo=config.DATABASE_URL,
+            max_size=20,
+            kwargs={"autocommit": True, "prepare_threshold": 0},
+        )
+        _checkpointer = PostgresSaver(pool)
+        _checkpointer.setup()
+    return _checkpointer

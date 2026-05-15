@@ -57,16 +57,27 @@ def user_id_from_session(session_id: str) -> int:
         return 1
 
 
+# @app.get("/history/{session_id}")
+# def history(session_id: str):
+#     msgs = sessions.get(session_id, [])
+#     # Excluir el system prompt
+#     filtered = [
+#         {"role": m["role"], "content": m["content"]}
+#         for m in msgs
+#         if m["role"] != "system"
+#     ]
+#     return {"history": filtered}
+
 @app.get("/history/{session_id}")
-def history(session_id: str):
-    msgs = sessions.get(session_id, [])
-    # Excluir el system prompt
-    filtered = [
-        {"role": m["role"], "content": m["content"]}
-        for m in msgs
-        if m["role"] != "system"
-    ]
-    return {"history": filtered}
+async def history(session_id: str):
+    user_id = user_id_from_session(session_id)
+    rows = await db_pool.fetch(
+        "SELECT role, content FROM agent.chat_messages "
+        "WHERE session_id = $1 AND user_id = $2 "
+        "ORDER BY created_at ASC",
+        session_id, user_id,
+    )
+    return {"history": [{"role": r["role"], "content": r["content"]} for r in rows]}
 
 
 
