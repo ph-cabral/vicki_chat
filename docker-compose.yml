@@ -21,6 +21,7 @@ services:
       HIK_USER: ${HIK_USER}
       HIK_PASS: ${HIK_PASS}
       HIK_DEVICES: ${HIK_DEVICES}
+      HIK_IPS: ${HIK_IPS}
       QDRANT_URL: http://n8n_qdrant:6333
       QDRANT_COLLECTION: cvs
       MODEL_NAME: gpt-4.1-mini
