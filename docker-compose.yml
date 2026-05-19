@@ -1,4 +1,4 @@
-services:          # ← FALTA ESTA LÍNEA
+services:
   chat-agent:
     build:
       context: .
@@ -7,6 +7,7 @@ services:          # ← FALTA ESTA LÍNEA
     restart: unless-stopped
     ports:
       - "8000:8000"
+    env_file: .env
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       OPENAI_API_MODEL: ${OPENAI_API_MODEL}
@@ -17,6 +18,9 @@ services:          # ← FALTA ESTA LÍNEA
       DB_NAME: ${POSTGRES_DB}
       DB_USER: ${POSTGRES_USER}
       DB_PASSWORD: ${POSTGRES_PASSWORD}
+      HIK_USER: ${HIK_USER}
+      HIK_PASS: ${HIK_PASS}
+      HIK_DEVICES: ${HIK_DEVICES}
       QDRANT_URL: http://n8n_qdrant:6333
       QDRANT_COLLECTION: cvs
       MODEL_NAME: gpt-4.1-mini
