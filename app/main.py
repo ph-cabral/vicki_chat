@@ -3,17 +3,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 import asyncpg
+import base64
+import traceback
+import os
 
 from langchain_core.messages import HumanMessage, AIMessage
 from app.graph import build_graph
 from app.config import config
 from app.memory import build_checkpointer
 from fastapi.responses import FileResponse
-from app.tools import SNAPSHOT_PATH
-import traceback
-
 from fastapi.staticfiles import StaticFiles
-import os
+from app.tools import SNAPSHOT_PATH
+from app.tool import take_camera_snapshot, create_employee, upload_face
 
 
 app = FastAPI(
@@ -21,7 +22,6 @@ app = FastAPI(
     description="Agente de selección de personal — Basdonax AI",
     version="1.0.0",
 )
-
 
 os.makedirs("/code/snapshots", exist_ok=True)
 app.mount("/snapshots", StaticFiles(directory="/code/snapshots"), name="snapshots")
@@ -34,20 +34,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# graph = build_graph()
 graph = None
 db_pool = None
+
 
 @app.get("/snapshot")
 def snapshot():
     return FileResponse(SNAPSHOT_PATH, media_type="image/jpeg")
- 
+
+
 @app.on_event("startup")
 async def startup():
     global db_pool, graph
     db_pool = await asyncpg.create_pool(config.DATABASE_URL)
     cp = await build_checkpointer()
     graph = build_graph().compile(checkpointer=cp)
+
+    # Tabla para draft de empleado en creación
+    await db_pool.execute("""
+        CREATE TABLE IF NOT EXISTS agent.employee_draft (
+            session_id TEXT PRIMARY KEY,
+            photo_b64 TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
 
 
 @app.on_event("shutdown")
@@ -67,23 +77,11 @@ class ChatResponse(BaseModel):
 
 
 def user_id_from_session(session_id: str) -> int:
-    # session_id = "user_1" -> 1
     try:
         return int(session_id.split("_")[1])
     except:
         return 1
 
-
-# @app.get("/history/{session_id}")
-# def history(session_id: str):
-#     msgs = sessions.get(session_id, [])
-#     # Excluir el system prompt
-#     filtered = [
-#         {"role": m["role"], "content": m["content"]}
-#         for m in msgs
-#         if m["role"] != "system"
-#     ]
-#     return {"history": filtered}
 
 @app.get("/history/{session_id}")
 async def history(session_id: str):
@@ -97,6 +95,67 @@ async def history(session_id: str):
     return {"history": [{"role": r["role"], "content": r["content"]} for r in rows]}
 
 
+# ====== Flujo crear empleado ======
+async def handle_employee_flow(session_id: str, message: str):
+    """Devuelve string si el mensaje cae en el flujo, o None."""
+    text = message.strip()
+    low = text.lower()
+
+    triggers = ("/crea un empleado", "/crear un empleado", "/crea empleado",
+                "/crear empleado", "/crea", "/crear")
+
+    # Paso 1: disparador
+    if any(low == t or low.startswith(t + " ") or low == t for t in triggers) or low in triggers:
+        try:
+            jpg = take_camera_snapshot()
+            b64 = base64.b64encode(jpg).decode()
+            await db_pool.execute("""
+                INSERT INTO agent.employee_draft (session_id, photo_b64)
+                VALUES ($1, $2)
+                ON CONFLICT (session_id) DO UPDATE
+                SET photo_b64 = EXCLUDED.photo_b64, created_at = NOW()
+            """, session_id, b64)
+
+            return (
+                "📸 Foto capturada del reloj:\n\n"
+                f"![foto](data:image/jpeg;base64,{b64})\n\n"
+                "Para crear al empleado respondé con el formato:\n"
+                "`Nombre Apellido, male`  o  `Nombre Apellido, female`"
+            )
+        except Exception as e:
+            return f"❌ Error tomando foto del reloj: {e}"
+
+    # Paso 2: hay draft + el mensaje tiene coma → procesar
+    row = await db_pool.fetchrow(
+        "SELECT photo_b64 FROM agent.employee_draft WHERE session_id = $1",
+        session_id
+    )
+    if row and "," in text:
+        try:
+            name_part, gender_part = [x.strip() for x in text.rsplit(",", 1)]
+            gender = gender_part.lower()
+            if gender not in ("male", "female"):
+                return "❌ Sexo inválido. Usá `male` o `female`. Ej: `Juan Pérez, male`"
+            if not name_part:
+                return "❌ Falta el nombre. Ej: `Juan Pérez, male`"
+
+            emp_no = create_employee(name=name_part, gender=gender)
+            try:
+                upload_face(emp_no, base64.b64decode(row["photo_b64"]))
+                face_msg = "con foto cargada"
+            except Exception as fe:
+                face_msg = f"⚠️ creado pero falló la foto: {fe}"
+
+            await db_pool.execute(
+                "DELETE FROM agent.employee_draft WHERE session_id = $1",
+                session_id
+            )
+            return f"✅ Empleado creado. Legajo **{emp_no}** — {name_part} ({gender}) {face_msg}"
+        except Exception as e:
+            return f"❌ Error creando empleado: {e}"
+
+    return None
+
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
@@ -104,7 +163,6 @@ async def chat(request: ChatRequest):
     user_id = user_id_from_session(session_id)
 
     try:
-        # Asegurar que la sesión exista
         await db_pool.execute(
             """
             INSERT INTO agent.chat_sessions (session_id, user_id)
@@ -114,13 +172,25 @@ async def chat(request: ChatRequest):
             session_id, user_id
         )
 
-        # Guardar mensaje del usuario
+        # === INTERCEPT: crear empleado ===
+        emp_answer = await handle_employee_flow(session_id, request.message)
+        if emp_answer is not None:
+            await db_pool.execute(
+                "INSERT INTO agent.chat_messages (session_id, user_id, role, content) VALUES ($1, $2, $3, $4)",
+                session_id, user_id, "human", request.message
+            )
+            await db_pool.execute(
+                "INSERT INTO agent.chat_messages (session_id, user_id, role, content) VALUES ($1, $2, $3, $4)",
+                session_id, user_id, "ai", emp_answer
+            )
+            return ChatResponse(response=emp_answer, session_id=session_id, intent="employee")
+
+        # === Flujo normal CVs ===
         await db_pool.execute(
             "INSERT INTO agent.chat_messages (session_id, user_id, role, content) VALUES ($1, $2, $3, $4)",
             session_id, user_id, "human", request.message
         )
 
-        # Cargar historial previo
         rows = await db_pool.fetch(
             "SELECT role, content FROM agent.chat_messages WHERE user_id = $1 ORDER BY created_at ASC",
             user_id
@@ -145,7 +215,6 @@ async def chat(request: ChatRequest):
         result = await graph.ainvoke(initial_state, config=graph_config)
         answer = result["final_response"]
 
-        # Guardar respuesta del asistente
         await db_pool.execute(
             "INSERT INTO agent.chat_messages (session_id, user_id, role, content) VALUES ($1, $2, $3, $4)",
             session_id, user_id, "ai", answer
@@ -165,6 +234,3 @@ async def chat(request: ChatRequest):
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "chat-cv-agent"}
-
-
-

@@ -2,6 +2,10 @@ from dotenv import load_dotenv
 import os
 
 
+HIK_USER = os.environ["HIK_USER"]
+HIK_PASS = os.environ["HIK_PASS"]
+HIK_IPS  = os.environ["HIK_IPS"].split(",")
+
 load_dotenv()
 
 class Config:

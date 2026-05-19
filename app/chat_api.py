@@ -8,20 +8,19 @@ import psycopg2
 import uuid
 import os
 import json
+import base64
 import logging
 
+from app.tool import take_camera_snapshot, create_employee, upload_face
 
 
 app = FastAPI()
 log = logging.getLogger("uvicorn.error")
 
-# Cliente principal: Anthropic
 anthropic_client = Anthropic(api_key=os.getenv("ANTHROPIC_KEY"))
-
-# Cliente fallback: OpenAI (también usado para embeddings)
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
 qdrant = QdrantClient(url="http://n8n_qdrant:6333")
+
 
 def get_db():
     return psycopg2.connect(
@@ -32,6 +31,58 @@ def get_db():
         password=os.getenv("DB_PASSWORD", "")
     )
 
+
+# ====== Tabla draft de empleado en creación ======
+def ensure_employee_state_table():
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS agent.employee_draft (
+            session_id TEXT PRIMARY KEY,
+            photo_b64 TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    db.commit()
+    cur.close()
+    db.close()
+
+ensure_employee_state_table()
+
+
+def save_draft(sid: str, photo_b64: str):
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        INSERT INTO agent.employee_draft (session_id, photo_b64)
+        VALUES (%s, %s)
+        ON CONFLICT (session_id) DO UPDATE
+        SET photo_b64 = EXCLUDED.photo_b64, created_at = NOW()
+    """, (sid, photo_b64))
+    db.commit()
+    cur.close()
+    db.close()
+
+
+def get_draft(sid: str):
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT photo_b64 FROM agent.employee_draft WHERE session_id = %s", (sid,))
+    row = cur.fetchone()
+    cur.close()
+    db.close()
+    return row[0] if row else None
+
+
+def del_draft(sid: str):
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("DELETE FROM agent.employee_draft WHERE session_id = %s", (sid,))
+    db.commit()
+    cur.close()
+    db.close()
+
+
 SYSTEM_PROMPT = """Sos Viki, una asistente virtual especializada en selección de personal.
 Tu rol es ayudar a encontrar candidatos ideales en la base de datos de CVs.
 Cuando el usuario pida buscar candidatos para un puesto, usá el contexto de CVs que se te proporciona.
@@ -39,14 +90,17 @@ Respondé en español, de forma clara y profesional.
 Si no encontrás candidatos relevantes, decilo honestamente.
 Presentá los candidatos con nombre, experiencia relevante y por qué encajan en el puesto."""
 
+
 class ChatRequest(BaseModel):
     message: str
     session_id: str = None
     user_id: str = "1"
 
+
 class ChatResponse(BaseModel):
     response: str
     session_id: str
+
 
 def ensure_session(session_id: str, user_id: str):
     db = get_db()
@@ -60,6 +114,7 @@ def ensure_session(session_id: str, user_id: str):
     cur.close()
     db.close()
 
+
 def save_message(session_id: str, user_id: str, role: str, content: str):
     db = get_db()
     cur = db.cursor()
@@ -70,6 +125,7 @@ def save_message(session_id: str, user_id: str, role: str, content: str):
     db.commit()
     cur.close()
     db.close()
+
 
 def load_history(session_id: str, user_id: str) -> list:
     db = get_db()
@@ -82,24 +138,11 @@ def load_history(session_id: str, user_id: str) -> list:
     rows = cur.fetchall()
     cur.close()
     db.close()
-    
     role_map = {"human": "user", "ai": "assistant"}
     return [{"role": role_map.get(r[0], r[0]), "content": r[1]} for r in rows]
 
-# def search_cvs(query: str, limit: int = 5) -> str:
-#     resp = openai_client.embeddings.create(input=query, model="text-embedding-3-small")
-#     vector = resp.data[0].embedding
-#     results = qdrant.query_points("cvs", query=vector, limit=limit, with_payload=True)
 
-#     context = ""
-#     for r in results.points:
-#         nombre = r.payload.get("metadata", {}).get("candidato_nombre", "N/A")
-#         content = r.payload.get("content", "")
-#         score = r.score
-#         context += f"\n--- Candidato: {nombre} (relevancia: {score:.2f}) ---\n{content}\n"
-#     return context
 def search_cvs(query: str, limit: int = 5) -> str:
-    import json
     resp = openai_client.embeddings.create(input=query, model="text-embedding-3-small")
     vector = resp.data[0].embedding
     results = qdrant.query_points("cvs", query=vector, limit=limit, with_payload=True)
@@ -126,8 +169,8 @@ def search_cvs(query: str, limit: int = 5) -> str:
                 )
     return context
 
+
 def llm_complete(system_prompt: str, messages: list) -> str:
-    """Intenta Anthropic; si falla, cae a OpenAI."""
     try:
         msgs = [m for m in messages if m["role"] != "system"]
         resp = anthropic_client.messages.create(
@@ -154,8 +197,6 @@ def llm_complete(system_prompt: str, messages: list) -> str:
 
 
 def llm_stream(system_prompt: str, messages: list):
-    """Generador que va emitiendo tokens. Anthropic con fallback a OpenAI."""
-    # 1) Anthropic streaming
     try:
         msgs = [m for m in messages if m["role"] != "system"]
         with anthropic_client.messages.stream(
@@ -171,7 +212,6 @@ def llm_stream(system_prompt: str, messages: list):
     except Exception as e:
         log.warning(f"Anthropic stream falló, fallback OpenAI: {e}")
 
-    # 2) OpenAI streaming
     try:
         resp = openai_client.chat.completions.create(
             model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
@@ -188,21 +228,75 @@ def llm_stream(system_prompt: str, messages: list):
         raise
 
 
+# ====== Manejador del flujo "crear empleado" ======
+def handle_employee_flow(sid: str, uid: str, msg: str):
+    """Devuelve un string si el mensaje pertenece al flujo, o None."""
+    text = msg.strip()
+    low = text.lower()
+
+    # Paso 1: disparador
+    if low.startswith("/crea un empleado") or low.startswith("/crea empleado") or low == "/crea":
+        try:
+            jpg = take_camera_snapshot()
+            b64 = base64.b64encode(jpg).decode()
+            save_draft(sid, b64)
+            return (
+                "📸 Foto capturada del reloj:\n\n"
+                f"![foto](data:image/jpeg;base64,{b64})\n\n"
+                "Para crear al empleado respondé con el formato:\n"
+                "`Nombre Apellido, male`  o  `Nombre Apellido, female`"
+            )
+        except Exception as e:
+            return f"❌ Error tomando foto del reloj: {e}"
+
+    # Paso 2: hay draft + el mensaje tiene coma → procesar
+    draft_b64 = get_draft(sid)
+    if draft_b64 and "," in text:
+        try:
+            name_part, gender_part = [x.strip() for x in text.rsplit(",", 1)]
+            gender = gender_part.lower()
+            if gender not in ("male", "female"):
+                return "❌ Sexo inválido. Usá `male` o `female`. Ej: `Juan Pérez, male`"
+            if not name_part:
+                return "❌ Falta el nombre. Ej: `Juan Pérez, male`"
+
+            emp_no = create_employee(name=name_part, gender=gender)
+            try:
+                upload_face(emp_no, base64.b64decode(draft_b64))
+                face_msg = "con foto cargada"
+            except Exception as fe:
+                face_msg = f"⚠️ creado pero falló la foto: {fe}"
+
+            del_draft(sid)
+            return f"✅ Empleado creado. Legajo **{emp_no}** — {name_part} ({gender}) {face_msg}"
+        except Exception as e:
+            return f"❌ Error creando empleado: {e}"
+
+    return None
+
+
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
     sid = req.session_id or str(uuid.uuid4())
     uid = req.user_id
 
     ensure_session(sid, uid)
-    history = load_history(sid, uid)
 
+    # Flujo crear empleado (intercepta antes del LLM)
+    emp_answer = handle_employee_flow(sid, uid, req.message)
+    if emp_answer is not None:
+        save_message(sid, uid, "human", req.message)
+        save_message(sid, uid, "ai", emp_answer)
+        return ChatResponse(response=emp_answer, session_id=sid)
+
+    # Flujo normal CVs
+    history = load_history(sid, uid)
     cv_context = search_cvs(req.message)
     user_msg = req.message
     if cv_context.strip():
         user_msg += f"\n\n[CONTEXTO DE CVs ENCONTRADOS EN LA BASE DE DATOS]:\n{cv_context}"
 
     save_message(sid, uid, "human", req.message)
-
     messages = history + [{"role": "user", "content": user_msg}]
     answer = llm_complete(SYSTEM_PROMPT, messages)
 
@@ -212,13 +306,28 @@ def chat(req: ChatRequest):
 
 @app.post("/chat/stream")
 def chat_stream(req: ChatRequest):
-    """Endpoint con streaming SSE. El cliente recibe los tokens a medida que se generan."""
     sid = req.session_id or str(uuid.uuid4())
     uid = req.user_id
 
     ensure_session(sid, uid)
-    history = load_history(sid, uid)
 
+    # Flujo crear empleado también en streaming
+    emp_answer = handle_employee_flow(sid, uid, req.message)
+    if emp_answer is not None:
+        save_message(sid, uid, "human", req.message)
+        save_message(sid, uid, "ai", emp_answer)
+
+        def emp_gen():
+            yield f"data: {json.dumps({'type': 'session', 'session_id': sid})}\n\n"
+            yield f"data: {json.dumps({'type': 'token', 'content': emp_answer})}\n\n"
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+        return StreamingResponse(emp_gen(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache",
+                                          "Connection": "keep-alive",
+                                          "X-Accel-Buffering": "no"})
+
+    history = load_history(sid, uid)
     cv_context = search_cvs(req.message)
     user_msg = req.message
     if cv_context.strip():
@@ -228,9 +337,7 @@ def chat_stream(req: ChatRequest):
     messages = history + [{"role": "user", "content": user_msg}]
 
     def event_generator():
-        # Enviar session_id primero
         yield f"data: {json.dumps({'type': 'session', 'session_id': sid})}\n\n"
-
         full_answer = ""
         try:
             for token in llm_stream(SYSTEM_PROMPT, messages):
@@ -239,13 +346,10 @@ def chat_stream(req: ChatRequest):
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
             return
-
-        # Guardar respuesta completa al final
         try:
             save_message(sid, uid, "ai", full_answer)
         except Exception as e:
             log.error(f"Error guardando mensaje: {e}")
-
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
     return StreamingResponse(
@@ -254,7 +358,7 @@ def chat_stream(req: ChatRequest):
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",  # desactiva buffering en nginx
+            "X-Accel-Buffering": "no",
         },
     )
 
@@ -263,6 +367,7 @@ def chat_stream(req: ChatRequest):
 def history(session_id: str, user_id: str = "1"):
     msgs = load_history(session_id, user_id)
     return {"history": msgs}
+
 
 @app.get("/health")
 def health():
