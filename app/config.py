@@ -1,14 +1,12 @@
 from dotenv import load_dotenv
 import os
 
-
-HIK_USER = os.environ["HIK_USER"]
-HIK_PASS = os.environ["HIK_PASS"]
-HIK_IPS  = os.environ["HIK_IPS"].split(",")
-
 load_dotenv()
 
 class Config:
+    HIK_USER: str = os.environ["HIK_USER"]
+    HIK_PASS: str = os.environ["HIK_PASS"]
+    HIK_IPS: list = os.environ["HIK_IPS"].split(",")
     ANTHROPIC_KEY: str = os.getenv("ANTHROPIC_KEY", "")
     ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
     QDRANT_URL: str = os.getenv("QDRANT_URL", "http://n8n_qdrant:6333")
@@ -21,9 +19,8 @@ class Config:
     TZ: str = os.getenv("TZ", "America/Argentina/Buenos_Aires")
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     DATABASE_URL: str = os.getenv(
-        "DATABASE_URL", 
+        "DATABASE_URL",
         "postgresql://n8n:3v3rW3ar@n8n_sql:5432/n8n"
     )
 
 config = Config()
-
