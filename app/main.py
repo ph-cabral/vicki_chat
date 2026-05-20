@@ -152,8 +152,8 @@ async def handle_employee_flow(session_id: str, message: str,
 
             jpg = read_snapshot()
             threading.Thread(
-                target=_deferred_upload_face,
-                args=(emp_no, ip, jpg, 30),
+                # target=_deferred_upload_face,
+                args=(emp_no, ip, jpg, 3),
                 daemon=True,
             ).start()
 
