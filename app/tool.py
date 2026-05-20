@@ -213,24 +213,43 @@ def upload_face(employee_no: str, jpg_bytes: bytes, ip: str = None, retries: int
     jpg_bytes = _shrink_jpg(jpg_bytes)
     print(f"[face-upload] emp={employee_no} ip={ip} bytes={len(jpg_bytes)}", flush=True)
     base = _base_for(ip) if ip else BASE
-    face_record = {"faceLibType": "blackFD", "FDID": "1", "FPID": employee_no}
-    url = f"{base}/ISAPI/Intelligent/FDLib/FaceDataRecord?format=json"
+    face_record = {"faceLibType": "blackFD", "FDID": "1", "FPID": str(employee_no)}
+
+    # 1) Intentar Record (alta)
+    url_rec = f"{base}/ISAPI/Intelligent/FDLib/FaceDataRecord?format=json"
+    # 2) Si ya existe, Modify (update)
+    url_mod = f"{base}/ISAPI/Intelligent/FDLib/FDModify?format=json&FDID=1&faceLibType=blackFD"
 
     last = None
     for i in range(retries):
         try:
-            enc = MultipartEncoder(fields={
-                "FaceDataRecord": (None, json.dumps(face_record), "application/json"),
-                "img": ("face.jpg", jpg_bytes, "image/jpeg"),
-            })
-            body = enc.to_string()  # serializa a bytes en memoria
+            enc = MultipartEncoder(fields=[
+                ("FaceDataRecord", (None, json.dumps(face_record), "application/json")),
+                ("img", ("face.jpg", jpg_bytes, "image/jpeg")),
+            ])
+            body = enc.to_string()
+            ctype = enc.content_type
+
             r = requests.post(
-                url,
+                url_rec,
                 auth=HTTPDigestAuth(CAMERA_USER, CAMERA_PASS),
                 data=body,
-                headers={"Content-Type": enc.content_type},
+                headers={"Content-Type": ctype},
                 timeout=30,
             )
+            print(f"[face-upload] POST status={r.status_code} body={r.text[:300]}", flush=True)
+
+            # Si ya existe → reintenta con Modify
+            if r.status_code == 400 and ("exist" in r.text.lower() or "duplicate" in r.text.lower()):
+                r = requests.put(
+                    url_mod,
+                    auth=HTTPDigestAuth(CAMERA_USER, CAMERA_PASS),
+                    data=body,
+                    headers={"Content-Type": ctype},
+                    timeout=30,
+                )
+                print(f"[face-upload] PUT status={r.status_code} body={r.text[:300]}", flush=True)
+
             r.raise_for_status()
             return r.json() if r.text else {}
         except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError) as e:
