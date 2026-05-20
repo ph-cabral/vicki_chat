@@ -49,22 +49,31 @@ def _base_for(ip: str) -> str:
     return f"http://{ip}"
 
 
+SNAPSHOT_PATH = "/code/snapshots/foto.jpg"
+SNAPSHOT_DIR = "/code/snapshots"
+
+
 def take_camera_snapshot() -> bytes:
-    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-        path = tmp.name
+    os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+    subprocess.run(
+        ["ffmpeg", "-y", "-rtsp_transport", "tcp", "-i", RTSP,
+         "-frames:v", "1", "-update", "1", "-q:v", "2", SNAPSHOT_PATH],
+        check=True, timeout=15, capture_output=True,
+    )
+    with open(SNAPSHOT_PATH, "rb") as f:
+        return f.read()
+
+
+def read_snapshot() -> bytes:
+    with open(SNAPSHOT_PATH, "rb") as f:
+        return f.read()
+
+
+def delete_snapshot() -> None:
     try:
-        subprocess.run(
-            ["ffmpeg", "-y", "-rtsp_transport", "tcp", "-i", RTSP,
-             "-frames:v", "1", "-update", "1", "-q:v", "2", path],
-            check=True, timeout=15, capture_output=True,
-        )
-        with open(path, "rb") as f:
-            return f.read()
-    finally:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
+        os.unlink(SNAPSHOT_PATH)
+    except OSError:
+        pass
 
 
 def snapshot_b64() -> str:
@@ -183,23 +192,14 @@ def upload_face(employee_no: str, jpg_bytes: bytes, ip: str = None) -> dict:
     face_record = {"faceLibType": "blackFD", "FDID": "1", "FPID": employee_no}
     url = f"{base}/ISAPI/Intelligent/FDLib/FaceDataRecord?format=json"
 
-    last_err = None
-    for max_side, kb in [(480, 60), (400, 50), (320, 40)]:
-        try:
-            small = resize_face(jpg_bytes, max_side=max_side, target_kb=kb)
-            import logging; logging.getLogger("uvicorn.error").info(    f"face upload: {len(small)} bytes, max_side={max_side}")
-            enc = MultipartEncoder(fields={
-                "FaceDataRecord": (None, json.dumps(face_record), "application/json"),
-                "img": ("face.jpg", small, "image/jpeg"),
-            })
-            r = requests.post(
-                url, auth=_auth(), data=enc,
-                headers={"Content-Type": enc.content_type},
-                timeout=30,
-            )
-            r.raise_for_status()
-            return r.json() if r.text else {}
-        except Exception as e:
-            last_err = e
-            continue
-    raise RuntimeError(f"No se pudo subir la foto: {last_err}")
+    enc = MultipartEncoder(fields={
+        "FaceDataRecord": (None, json.dumps(face_record), "application/json"),
+        "img": ("face.jpg", jpg_bytes, "image/jpeg"),
+    })
+    r = requests.post(
+        url, auth=_auth(), data=enc,
+        headers={"Content-Type": enc.content_type},
+        timeout=30,
+    )
+    r.raise_for_status()
+    return r.json() if r.text else {}

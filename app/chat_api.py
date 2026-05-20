@@ -11,7 +11,7 @@ import json
 import base64
 import logging
 
-from app.tool import take_camera_snapshot, create_employee, upload_face, resolve_location
+from app.tool import take_camera_snapshot, create_employee, upload_face, resolve_location, read_snapshot, delete_snapshot
 
 
 app = FastAPI()
@@ -268,7 +268,8 @@ def handle_employee_flow(sid: str, uid: str, msg: str, gender: str = None, locat
 
             emp_no, ip = create_employee(name=name_part, gender=gender_norm, location=location)
             try:
-                upload_face(emp_no, base64.b64decode(draft_b64), ip=ip)
+                upload_face(emp_no, read_snapshot(), ip=ip)
+                delete_snapshot()
                 face_msg = "con foto cargada"
             except Exception as fe:
                 face_msg = f"⚠️ creado pero falló la foto: {fe}"

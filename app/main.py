@@ -14,7 +14,7 @@ from app.memory import build_checkpointer
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from app.tools import SNAPSHOT_PATH
-from app.tool import take_camera_snapshot, create_employee, upload_face, resolve_location
+from app.tool import take_camera_snapshot, create_employee, upload_face, resolve_location, read_snapshot, delete_snapshot
 
 
 app = FastAPI(
@@ -149,7 +149,8 @@ async def handle_employee_flow(session_id: str, message: str,
 
             emp_no, ip = create_employee(name=name_part, gender=gender_norm, location=location)
             try:
-                upload_face(emp_no, base64.b64decode(row["photo_b64"]), ip=ip)
+                upload_face(emp_no, read_snapshot(), ip=ip)
+                delete_snapshot()
                 face_msg = "con foto cargada"
             except Exception as fe:
                 face_msg = f"⚠️ creado pero falló la foto: {fe}"
