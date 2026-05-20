@@ -12,7 +12,7 @@ import time
 import cv2, numpy as np
 import threading
 
-
+from io import BytesIO
 from PIL import Image
 
 _CASCADE = cv2.CascadeClassifier(
@@ -210,9 +210,12 @@ def _wait_user_committed(employee_no: str, ip: str, retries: int = 8, delay: flo
 
 
 def upload_face(employee_no: str, jpg_bytes: bytes, ip: str = None, retries: int = 3) -> dict:
+    jpg_bytes = _shrink_jpg(jpg_bytes)
+    print(f"[face-upload] emp={employee_no} ip={ip} bytes={len(jpg_bytes)}", flush=True)
     base = _base_for(ip) if ip else BASE
     face_record = {"faceLibType": "blackFD", "FDID": "1", "FPID": employee_no}
     url = f"{base}/ISAPI/Intelligent/FDLib/FaceDataRecord?format=json"
+
     last = None
     for i in range(retries):
         try:
@@ -220,8 +223,11 @@ def upload_face(employee_no: str, jpg_bytes: bytes, ip: str = None, retries: int
                 "FaceDataRecord": (None, json.dumps(face_record), "application/json"),
                 "img": ("face.jpg", jpg_bytes, "image/jpeg"),
             })
+            body = enc.to_string()  # serializa a bytes en memoria
             r = requests.post(
-                url, auth=_auth(), data=enc,
+                url,
+                auth=HTTPDigestAuth(CAMERA_USER, CAMERA_PASS),
+                data=body,
                 headers={"Content-Type": enc.content_type},
                 timeout=30,
             )
@@ -231,7 +237,6 @@ def upload_face(employee_no: str, jpg_bytes: bytes, ip: str = None, retries: int
             last = e
             time.sleep(2 * (i + 1))
     raise last
-
 
 def _deferred_upload_face(emp_no: str, ip: str, jpg: bytes, delay: int = 30):
     time.sleep(delay)
@@ -243,3 +248,15 @@ def _deferred_upload_face(emp_no: str, ip: str, jpg: bytes, delay: int = 30):
         print(f"[face-upload] emp={emp_no} ip={ip} FAIL: {e}", flush=True)
     else:
         print(f"[face-upload] emp={emp_no} ip={ip} OK", flush=True)
+        
+def _shrink_jpg(jpg_bytes: bytes, max_kb: int = 40, max_side: int = 480) -> bytes:
+    img = Image.open(BytesIO(jpg_bytes)).convert("RGB")
+    w, h = img.size
+    if max(w, h) > max_side:
+        img.thumbnail((max_side, max_side), Image.LANCZOS)
+    for q in (75, 65, 55, 45, 35, 25):
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=q, optimize=True)
+        if buf.tell() <= max_kb * 1024:
+            return buf.getvalue()
+    return buf.getvalue()
