@@ -216,22 +216,22 @@ def upload_face(employee_no: str, jpg_bytes: bytes, ip: str = None, retries: int
     last = None
     for i in range(retries):
         try:
-            with requests.Session() as s:
-                enc = MultipartEncoder(fields={
-                    "FaceDataRecord": (None, json.dumps(face_record), "application/json"),
-                    "img": ("face.jpg", jpg_bytes, "image/jpeg"),
-                })
-                r = s.post(
-                    url, auth=_auth(), data=enc,
-                    headers={"Content-Type": enc.content_type, "Connection": "close"},
-                    timeout=30,
-                )
-                r.raise_for_status()
-                return r.json() if r.text else {}
+            enc = MultipartEncoder(fields={
+                "FaceDataRecord": (None, json.dumps(face_record), "application/json"),
+                "img": ("face.jpg", jpg_bytes, "image/jpeg"),
+            })
+            r = requests.post(
+                url, auth=_auth(), data=enc,
+                headers={"Content-Type": enc.content_type},
+                timeout=30,
+            )
+            r.raise_for_status()
+            return r.json() if r.text else {}
         except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError) as e:
             last = e
             time.sleep(2 * (i + 1))
     raise last
+
 
 def _deferred_upload_face(emp_no: str, ip: str, jpg: bytes, delay: int = 30):
     time.sleep(delay)

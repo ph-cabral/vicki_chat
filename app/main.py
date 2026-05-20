@@ -157,7 +157,7 @@ async def handle_employee_flow(session_id: str, message: str,
                 daemon=True,
             ).start()
 
-            del_draft(sid)
+            del_draft(session_id)
             return f"✅ Empleado **{emp_no}** — {name_part} ({gender_norm}) @ {location.lower()} ({ip}) — foto se subirá en 30s"
         except Exception as e:
             return f"❌ Error creando empleado: {e}"
