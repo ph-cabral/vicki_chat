@@ -10,8 +10,8 @@ import os
 import json
 import base64
 import logging
-
-from app.tool import take_camera_snapshot, create_employee, upload_face, resolve_location, read_snapshot, delete_snapshot
+import threading, time
+from app.tool import take_camera_snapshot, create_employee, upload_face, resolve_location, read_snapshot, delete_snapshot, _deferred_upload_face
 
 
 app = FastAPI()

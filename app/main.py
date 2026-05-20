@@ -6,6 +6,7 @@ import asyncpg
 import base64
 import traceback
 import os
+import threading, time
 
 from langchain_core.messages import HumanMessage, AIMessage
 from app.graph import build_graph
@@ -14,8 +15,8 @@ from app.memory import build_checkpointer
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from app.tools import SNAPSHOT_PATH
-from app.tool import take_camera_snapshot, create_employee, upload_face, resolve_location, read_snapshot, delete_snapshot
-
+from app.tool import take_camera_snapshot, create_employee, upload_face, resolve_location, read_snapshot, delete_snapshot, _deferred_upload_face
+from app.chat_api import del_draft
 
 app = FastAPI(
     title="Chat CV Agent",
@@ -148,18 +149,16 @@ async def handle_employee_flow(session_id: str, message: str,
                 return f"❌ {ve}"
 
             emp_no, ip = create_employee(name=name_part, gender=gender_norm, location=location)
-            try:
-                upload_face(emp_no, read_snapshot(), ip=ip)
-                delete_snapshot()
-                face_msg = "con foto cargada"
-            except Exception as fe:
-                face_msg = f"⚠️ creado pero falló la foto: {fe}"
 
-            await db_pool.execute(
-                "DELETE FROM agent.employee_draft WHERE session_id = $1",
-                session_id
-            )
-            return f"✅ Empleado **{emp_no}** — {name_part} ({gender_norm}) @ {location.lower()} ({ip}) {face_msg}"
+            jpg = read_snapshot()
+            threading.Thread(
+                target=_deferred_upload_face,
+                args=(emp_no, ip, jpg, 30),
+                daemon=True,
+            ).start()
+
+            del_draft(sid)
+            return f"✅ Empleado **{emp_no}** — {name_part} ({gender_norm}) @ {location.lower()} ({ip}) — foto se subirá en 30s"
         except Exception as e:
             return f"❌ Error creando empleado: {e}"
 

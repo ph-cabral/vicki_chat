@@ -8,8 +8,11 @@ import json
 import os
 import io
 import uuid
-
+import time
 import cv2, numpy as np
+import threading
+
+
 from PIL import Image
 
 _CASCADE = cv2.CascadeClassifier(
@@ -187,19 +190,56 @@ def create_employee(name: str, gender: str, location: str = DEFAULT_LOCATION, em
     return employee_no, ip
 
 
-def upload_face(employee_no: str, jpg_bytes: bytes, ip: str = None) -> dict:
+def _wait_user_committed(employee_no: str, ip: str, retries: int = 8, delay: float = 0.5) -> bool:
+    base = _base_for(ip)
+    url = f"{base}/ISAPI/AccessControl/UserInfo/Search?format=json"
+    sid = str(uuid.uuid4())[:8]
+    for _ in range(retries):
+        body = {"UserInfoSearchCond": {
+            "searchID": sid, "searchResultPosition": 0, "maxResults": 1,
+            "EmployeeNoList": [{"employeeNo": employee_no}]
+        }}
+        try:
+            data = _post_json(url, body).get("UserInfoSearch", {})
+            if any(u.get("employeeNo") == employee_no for u in (data.get("UserInfo") or [])):
+                return True
+        except Exception:
+            pass
+        time.sleep(delay)
+    return False
+
+
+def upload_face(employee_no: str, jpg_bytes: bytes, ip: str = None, retries: int = 3) -> dict:
     base = _base_for(ip) if ip else BASE
     face_record = {"faceLibType": "blackFD", "FDID": "1", "FPID": employee_no}
     url = f"{base}/ISAPI/Intelligent/FDLib/FaceDataRecord?format=json"
+    last = None
+    for i in range(retries):
+        try:
+            with requests.Session() as s:
+                enc = MultipartEncoder(fields={
+                    "FaceDataRecord": (None, json.dumps(face_record), "application/json"),
+                    "img": ("face.jpg", jpg_bytes, "image/jpeg"),
+                })
+                r = s.post(
+                    url, auth=_auth(), data=enc,
+                    headers={"Content-Type": enc.content_type, "Connection": "close"},
+                    timeout=30,
+                )
+                r.raise_for_status()
+                return r.json() if r.text else {}
+        except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError) as e:
+            last = e
+            time.sleep(2 * (i + 1))
+    raise last
 
-    enc = MultipartEncoder(fields={
-        "FaceDataRecord": (None, json.dumps(face_record), "application/json"),
-        "img": ("face.jpg", jpg_bytes, "image/jpeg"),
-    })
-    r = requests.post(
-        url, auth=_auth(), data=enc,
-        headers={"Content-Type": enc.content_type},
-        timeout=30,
-    )
-    r.raise_for_status()
-    return r.json() if r.text else {}
+def _deferred_upload_face(emp_no: str, ip: str, jpg: bytes, delay: int = 30):
+    time.sleep(delay)
+    try:
+        from app.tool import upload_face, delete_snapshot
+        upload_face(emp_no, jpg, ip=ip)
+        delete_snapshot()
+    except Exception as e:
+        print(f"[face-upload] emp={emp_no} ip={ip} FAIL: {e}", flush=True)
+    else:
+        print(f"[face-upload] emp={emp_no} ip={ip} OK", flush=True)
