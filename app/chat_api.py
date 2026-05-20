@@ -11,7 +11,7 @@ import json
 import base64
 import logging
 
-from app.tool import take_camera_snapshot, create_employee, upload_face
+from app.tool import take_camera_snapshot, create_employee, upload_face, resolve_location
 
 
 app = FastAPI()
@@ -95,6 +95,8 @@ class ChatRequest(BaseModel):
     message: str
     session_id: str = None
     user_id: str = "1"
+    gender: str = None
+    location: str = None
 
 
 class ChatResponse(BaseModel):
@@ -229,7 +231,7 @@ def llm_stream(system_prompt: str, messages: list):
 
 
 # ====== Manejador del flujo "crear empleado" ======
-def handle_employee_flow(sid: str, uid: str, msg: str):
+def handle_employee_flow(sid: str, uid: str, msg: str, gender: str = None, location: str = None):
     """Devuelve un string si el mensaje pertenece al flujo, o None."""
     text = msg.strip()
     low = text.lower()
@@ -243,32 +245,36 @@ def handle_employee_flow(sid: str, uid: str, msg: str):
             return (
                 "📸 Foto capturada del reloj:\n\n"
                 f"![foto](data:image/jpeg;base64,{b64})\n\n"
-                "Para crear al empleado respondé con el formato:\n"
-                "`Nombre Apellido, male`  o  `Nombre Apellido, female`"
+                "Seleccioná sexo y ubicación, luego escribí el nombre."
             )
         except Exception as e:
             return f"❌ Error tomando foto del reloj: {e}"
 
-    # Paso 2: hay draft + el mensaje tiene coma → procesar
+    # Paso 2: hay draft + viene metadata estructurada → crear directo
     draft_b64 = get_draft(sid)
-    if draft_b64 and "," in text:
+    if draft_b64 and gender and location:
         try:
-            name_part, gender_part = [x.strip() for x in text.rsplit(",", 1)]
-            gender = gender_part.lower()
-            if gender not in ("male", "female"):
-                return "❌ Sexo inválido. Usá `male` o `female`. Ej: `Juan Pérez, male`"
+            g = (gender or "").strip().lower()
+            gender_norm = {"m": "male", "male": "male", "f": "female", "female": "female"}.get(g)
+            if not gender_norm:
+                return "❌ Sexo inválido."
+            name_part = text
             if not name_part:
-                return "❌ Falta el nombre. Ej: `Juan Pérez, male`"
-
-            emp_no = create_employee(name=name_part, gender=gender)
+                return "❌ Falta el nombre."
             try:
-                upload_face(emp_no, base64.b64decode(draft_b64))
+                resolve_location(location)
+            except ValueError as ve:
+                return f"❌ {ve}"
+
+            emp_no, ip = create_employee(name=name_part, gender=gender_norm, location=location)
+            try:
+                upload_face(emp_no, base64.b64decode(draft_b64), ip=ip)
                 face_msg = "con foto cargada"
             except Exception as fe:
                 face_msg = f"⚠️ creado pero falló la foto: {fe}"
 
             del_draft(sid)
-            return f"✅ Empleado creado. Legajo **{emp_no}** — {name_part} ({gender}) {face_msg}"
+            return f"✅ Empleado **{emp_no}** — {name_part} ({gender_norm}) @ {location.lower()} ({ip}) {face_msg}"
         except Exception as e:
             return f"❌ Error creando empleado: {e}"
 
@@ -283,7 +289,7 @@ def chat(req: ChatRequest):
     ensure_session(sid, uid)
 
     # Flujo crear empleado (intercepta antes del LLM)
-    emp_answer = handle_employee_flow(sid, uid, req.message)
+    emp_answer = handle_employee_flow(sid, uid, req.message, req.gender, req.location)
     if emp_answer is not None:
         save_message(sid, uid, "human", req.message)
         save_message(sid, uid, "ai", emp_answer)
@@ -312,7 +318,7 @@ def chat_stream(req: ChatRequest):
     ensure_session(sid, uid)
 
     # Flujo crear empleado también en streaming
-    emp_answer = handle_employee_flow(sid, uid, req.message)
+    emp_answer = handle_employee_flow(sid, uid, req.message, req.gender, req.location)
     if emp_answer is not None:
         save_message(sid, uid, "human", req.message)
         save_message(sid, uid, "ai", emp_answer)

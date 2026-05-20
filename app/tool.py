@@ -16,10 +16,19 @@ _CASCADE = cv2.CascadeClassifier(
     cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
 )
 
-CAMERA_IP = os.getenv("CAMERA_IP", "10.10.0.30")
 CAMERA_USER = os.getenv("CAMERA_USER", "admin")
 CAMERA_PASS = os.getenv("CAMERA_PASS", "161982br")
 
+# Ubicación -> IP del reloj
+LOCATIONS = {
+    "oficina": "10.10.0.12",
+    "fabrica": "10.10.0.30",
+    "lilser":  "10.10.0.92",
+}
+DEFAULT_LOCATION = "fabrica"
+
+# Compat: snapshot por defecto
+CAMERA_IP = os.getenv("CAMERA_IP", LOCATIONS[DEFAULT_LOCATION])
 BASE = f"http://{CAMERA_IP}"
 RTSP = f"rtsp://{CAMERA_USER}:{CAMERA_PASS}@{CAMERA_IP}:554/Streaming/Channels/101"
 JSON_HDR = {"Content-Type": "application/json"}
@@ -27,6 +36,17 @@ JSON_HDR = {"Content-Type": "application/json"}
 
 def _auth():
     return HTTPDigestAuth(CAMERA_USER, CAMERA_PASS)
+
+
+def resolve_location(loc: str) -> str:
+    key = (loc or "").strip().lower()
+    if key not in LOCATIONS:
+        raise ValueError(f"Ubicación inválida: {loc}. Usá: {', '.join(LOCATIONS)}")
+    return LOCATIONS[key]
+
+
+def _base_for(ip: str) -> str:
+    return f"http://{ip}"
 
 
 def take_camera_snapshot() -> bytes:
@@ -105,8 +125,9 @@ def _post_json(url: str, body: dict, timeout: int = 15) -> dict:
     return r.json() if r.text else {}
 
 
-def next_employee_no() -> str:
-    url = f"{BASE}/ISAPI/AccessControl/UserInfo/Search?format=json"
+def next_employee_no(ip: str = None) -> str:
+    base = _base_for(ip) if ip else BASE
+    url = f"{base}/ISAPI/AccessControl/UserInfo/Search?format=json"
     max_no = 0
     pos = 0
     sid = str(uuid.uuid4())[:8]
@@ -130,11 +151,13 @@ def next_employee_no() -> str:
     return str(max_no + 1)
 
 
-def create_employee(name: str, gender: str, employee_no: str = None) -> str:
+def create_employee(name: str, gender: str, location: str = DEFAULT_LOCATION, employee_no: str = None) -> tuple:
+    ip = resolve_location(location)
+    base = _base_for(ip)
     if employee_no is None:
-        employee_no = next_employee_no()
+        employee_no = next_employee_no(ip=ip)
 
-    url = f"{BASE}/ISAPI/AccessControl/UserInfo/Record?format=json"
+    url = f"{base}/ISAPI/AccessControl/UserInfo/Record?format=json"
     payload = {"UserInfo": {
         "employeeNo": employee_no,
         "name": name,
@@ -152,12 +175,13 @@ def create_employee(name: str, gender: str, employee_no: str = None) -> str:
         "localUIRight": False
     }}
     _post_json(url, payload)
-    return employee_no
+    return employee_no, ip
 
 
-def upload_face(employee_no: str, jpg_bytes: bytes) -> dict:
+def upload_face(employee_no: str, jpg_bytes: bytes, ip: str = None) -> dict:
+    base = _base_for(ip) if ip else BASE
     face_record = {"faceLibType": "blackFD", "FDID": "1", "FPID": employee_no}
-    url = f"{BASE}/ISAPI/Intelligent/FDLib/FaceDataRecord?format=json"
+    url = f"{base}/ISAPI/Intelligent/FDLib/FaceDataRecord?format=json"
 
     last_err = None
     for max_side, kb in [(480, 60), (400, 50), (320, 40)]:

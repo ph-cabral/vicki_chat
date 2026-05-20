@@ -14,7 +14,7 @@ from app.memory import build_checkpointer
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from app.tools import SNAPSHOT_PATH
-from app.tool import take_camera_snapshot, create_employee, upload_face
+from app.tool import take_camera_snapshot, create_employee, upload_face, resolve_location
 
 
 app = FastAPI(
@@ -68,6 +68,8 @@ async def shutdown():
 class ChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = None
+    gender: Optional[str] = None
+    location: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
@@ -96,7 +98,9 @@ async def history(session_id: str):
 
 
 # ====== Flujo crear empleado ======
-async def handle_employee_flow(session_id: str, message: str):
+async def handle_employee_flow(session_id: str, message: str,
+                               gender: Optional[str] = None,
+                               location: Optional[str] = None):
     """Devuelve string si el mensaje cae en el flujo, o None."""
     text = message.strip()
     low = text.lower()
@@ -119,29 +123,33 @@ async def handle_employee_flow(session_id: str, message: str):
             return (
                 "📸 Foto capturada del reloj:\n\n"
                 f"![foto](data:image/jpeg;base64,{b64})\n\n"
-                "Para crear al empleado respondé con el formato:\n"
-                "`Nombre Apellido, male`  o  `Nombre Apellido, female`"
+                "Seleccioná sexo y ubicación, luego escribí el nombre."
             )
         except Exception as e:
             return f"❌ Error tomando foto del reloj: {e}"
 
-    # Paso 2: hay draft + el mensaje tiene coma → procesar
+    # Paso 2: hay draft + viene metadata estructurada → crear directo
     row = await db_pool.fetchrow(
         "SELECT photo_b64 FROM agent.employee_draft WHERE session_id = $1",
         session_id
     )
-    if row and "," in text:
+    if row and gender and location:
         try:
-            name_part, gender_part = [x.strip() for x in text.rsplit(",", 1)]
-            gender = gender_part.lower()
-            if gender not in ("male", "female"):
-                return "❌ Sexo inválido. Usá `male` o `female`. Ej: `Juan Pérez, male`"
+            g = (gender or "").strip().lower()
+            gender_norm = {"m": "male", "male": "male", "f": "female", "female": "female"}.get(g)
+            if not gender_norm:
+                return "❌ Sexo inválido."
+            name_part = text
             if not name_part:
-                return "❌ Falta el nombre. Ej: `Juan Pérez, male`"
-
-            emp_no = create_employee(name=name_part, gender=gender)
+                return "❌ Falta el nombre."
             try:
-                upload_face(emp_no, base64.b64decode(row["photo_b64"]))
+                resolve_location(location)
+            except ValueError as ve:
+                return f"❌ {ve}"
+
+            emp_no, ip = create_employee(name=name_part, gender=gender_norm, location=location)
+            try:
+                upload_face(emp_no, base64.b64decode(row["photo_b64"]), ip=ip)
                 face_msg = "con foto cargada"
             except Exception as fe:
                 face_msg = f"⚠️ creado pero falló la foto: {fe}"
@@ -150,7 +158,7 @@ async def handle_employee_flow(session_id: str, message: str):
                 "DELETE FROM agent.employee_draft WHERE session_id = $1",
                 session_id
             )
-            return f"✅ Empleado creado. Legajo **{emp_no}** — {name_part} ({gender}) {face_msg}"
+            return f"✅ Empleado **{emp_no}** — {name_part} ({gender_norm}) @ {location.lower()} ({ip}) {face_msg}"
         except Exception as e:
             return f"❌ Error creando empleado: {e}"
 
@@ -173,7 +181,7 @@ async def chat(request: ChatRequest):
         )
 
         # === INTERCEPT: crear empleado ===
-        emp_answer = await handle_employee_flow(session_id, request.message)
+        emp_answer = await handle_employee_flow(session_id, request.message, request.gender, request.location)
         if emp_answer is not None:
             await db_pool.execute(
                 "INSERT INTO agent.chat_messages (session_id, user_id, role, content) VALUES ($1, $2, $3, $4)",
