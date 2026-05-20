@@ -12,7 +12,7 @@ import subprocess, base64, tempfile, os, time
 CAMERA_IP = "10.10.0.30"
 CAMERA_USER = "admin"
 CAMERA_PASS = "161982br"
-SNAPSHOT_PATH = "/code/snapshots/latest.jpg"
+SNAPSHOT_PATH = "/code/snapshots/foto.jpg"
 SNAPSHOT_DIR = "/code/snapshots"
 PUBLIC_BASE = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000")
 
@@ -50,15 +50,13 @@ def build_retriever_tool():
 
 def take_camera_snapshot() -> str:
     os.makedirs(SNAPSHOT_DIR, exist_ok=True)
-    fname = f"{int(time.time())}.jpg"
-    path = os.path.join(SNAPSHOT_DIR, fname)
     rtsp = f"rtsp://{CAMERA_USER}:{CAMERA_PASS}@{CAMERA_IP}:554/Streaming/Channels/101"
     subprocess.run(
         ["ffmpeg", "-y", "-rtsp_transport", "tcp", "-i", rtsp,
-         "-frames:v", "1", "-update", "1", "-q:v", "2", path],
+         "-frames:v", "1", "-update", "1", "-q:v", "2", SNAPSHOT_PATH],
         check=True, timeout=15, capture_output=True,
     )
-    return f"{PUBLIC_BASE}/snapshots/{fname}"
+    return f"{PUBLIC_BASE}/snapshots/foto.jpg"
 
 def get_snapshot_b64() -> str | None:
     if not os.path.exists(SNAPSHOT_PATH):

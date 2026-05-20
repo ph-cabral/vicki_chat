@@ -1,2 +1,5 @@
 .env
 snapshots/
+.env
+.env.
+.gitignore
