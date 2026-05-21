@@ -257,7 +257,7 @@ def upload_face(employee_no: str, jpg_bytes: bytes, ip: str = None, retries: int
             time.sleep(2 * (i + 1))
     raise last
 
-def _deferred_upload_face(emp_no: str, ip: str, jpg: bytes, delay: int = 30):
+def _deferred_upload_face(emp_no: str, ip: str, jpg: bytes, delay: int = 10):
     time.sleep(delay)
     try:
         from app.tool import upload_face, delete_snapshot

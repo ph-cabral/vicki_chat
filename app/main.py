@@ -151,14 +151,21 @@ async def handle_employee_flow(session_id: str, message: str,
             emp_no, ip = create_employee(name=name_part, gender=gender_norm, location=location)
 
             jpg = read_snapshot()
-            threading.Thread(
-                # target=_deferred_upload_face,
-                args=(emp_no, ip, jpg, 3),
-                daemon=True,
-            ).start()
+            # threading.Thread(
+            #     # target=_deferred_upload_face,
+            #     args=(emp_no, ip, jpg, 3),
+            #     daemon=True,
+            # ).start()
+            try:
+                upload_face(emp_no, jpg, ip=ip)
+                delete_snapshot()
+                foto_msg = "foto subida ✅"
+            except Exception as e:
+                foto_msg = f"foto pendiente ({e})"
 
             del_draft(session_id)
-            return f"✅ Empleado **{emp_no}** — {name_part} ({gender_norm}) @ {location.lower()} ({ip}) — foto se subirá en 30s"
+            # return f"✅ Empleazdo **{emp_no}** — {name_part} ({gender_norm}) @ {location.lower()} ({ip}) — foto se subirá en 30s"
+            return f"✅ Empleado **{emp_no}** — {name_part} ({gender_norm}) @ {location.lower()} ({ip}) — {foto_msg}"
         except Exception as e:
             return f"❌ Error creando empleado: {e}"
 
