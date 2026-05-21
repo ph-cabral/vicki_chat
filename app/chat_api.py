@@ -268,7 +268,7 @@ def handle_employee_flow(sid: str, uid: str, msg: str, gender: str = None, locat
 
             emp_no, ip = create_employee(name=name_part, gender=gender_norm, location=location)
             try:
-                upload_face(emp_no, read_snapshot(), ip=ip, 10)
+                upload_face(emp_no, read_snapshot(), ip=ip)
                 delete_snapshot()
                 face_msg = "con foto cargada"
             except Exception as fe:

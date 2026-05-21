@@ -156,7 +156,15 @@ async def handle_employee_flow(session_id: str, message: str,
             #     args=(emp_no, ip, jpg, 3),
             #     daemon=True,
             # ).start()
+            # try:
+            #     upload_face(emp_no, jpg, ip=ip)
+            #     delete_snapshot()
+            #     foto_msg = "foto subida ✅"
+            # except Exception as e:
+            #     foto_msg = f"foto pendiente ({e})"
             try:
+                from app.tool import _wait_user_committed
+                _wait_user_committed(emp_no, ip)
                 upload_face(emp_no, jpg, ip=ip)
                 delete_snapshot()
                 foto_msg = "foto subida ✅"
