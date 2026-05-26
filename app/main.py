@@ -185,7 +185,12 @@ async def handle_employee_flow(session_id: str, message: str,
             return f"❌ Error creando empleado: {e}"
 
     return None
-
+@app.get("/draft_status/{session_id}")
+async def draft_status(session_id: str):
+    row = await db_pool.fetchrow(
+        "SELECT 1 FROM agent.employee_draft WHERE session_id = $1", session_id
+    )
+    return {"has_draft": bool(row)}
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):

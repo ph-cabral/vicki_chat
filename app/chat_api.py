@@ -247,7 +247,12 @@ def handle_employee_flow(sid: str, uid: str, msg: str, gender: str = None, locat
             #     f"![foto](data:image/jpeg;base64,{b64})\n\n"
             #     "Seleccioná sexo y ubicación, luego escribí el nombre."
             # )
-            return f" ✅ Foto tomada, ingresa datos... "
+            # return f" ✅ Foto tomada, ingresa datos... "
+            return (
+                "📸 Foto tomada:\n\n"
+                f"![foto](data:image/jpeg;base64,{b64})\n\n"
+                "Seleccioná sexo y ubicación, luego escribí el nombre."
+            )
         except Exception as e:
             return f"❌ Error tomando foto del reloj: {e}"
 

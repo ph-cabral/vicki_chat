@@ -9,7 +9,7 @@ import base64
 import subprocess, base64, tempfile, os, time
 
 
-CAMERA_IP = "10.10.0.30"
+CAMERA_IP = "10.10.0.12"
 CAMERA_USER = "admin"
 CAMERA_PASS = "161982br"
 SNAPSHOT_PATH = "/code/snapshots/foto.jpg"
