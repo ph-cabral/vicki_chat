@@ -126,11 +126,14 @@ async def handle_employee_flow(session_id: str, message: str,
                 SET photo_b64 = EXCLUDED.photo_b64, created_at = NOW()
             """, session_id, b64)
 
-            # return (
+            return (
             #     "📸 Foto capturada del reloj:\n\n"
             #     "Seleccioná sexo y ubicación, luego escribí el nombre."
             # )
-            return "✅ Foto tomada, ingresa datos..."
+            # f"✅ {name_part} fué ingresado en el reloj de {location.lower()}\n\n"
+                f"![foto](data:image/jpeg;base64,{draft_b64})"
+            )
+            # return "✅ Foto tomada, ingresa datos..."
         except Exception as e:
             return f"❌ Error tomando foto del reloj: {e}"
 
@@ -169,7 +172,7 @@ async def handle_employee_flow(session_id: str, message: str,
                 foto_msg = f"foto pendiente ({e})"
 
             del_draft(session_id)
-            return f"✅ Empleazdo **{emp_no}** — {name_part} ({gender_norm}) @ {location.lower()} ({ip}) — foto se subirá en 30s"
+            return f"✅ {name_part} se creo en el reloj de {location.lower()}"
             # return (
             #     f"✅ {name_part} fué ingresado en el reloj de {location.lower()}\n\n"
             #     f"![foto](data:image/jpeg;base64,{draft_b64})"
