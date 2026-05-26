@@ -209,15 +209,63 @@ def _wait_user_committed(employee_no: str, ip: str, retries: int = 8, delay: flo
     return False
 
 
+# def upload_face(employee_no: str, jpg_bytes: bytes, ip: str = None, retries: int = 3) -> dict:
+#     jpg_bytes = _shrink_jpg(jpg_bytes)
+#     print(f"[face-upload] emp={employee_no} ip={ip} bytes={len(jpg_bytes)}", flush=True)
+#     base = _base_for(ip) if ip else BASE
+#     face_record = {"faceLibType": "blackFD", "FDID": "1", "FPID": str(employee_no)}
+
+#     # 1) Intentar Record (alta)
+#     url_rec = f"{base}/ISAPI/Intelligent/FDLib/FaceDataRecord?format=json"
+#     # 2) Si ya existe, Modify (update)
+#     url_mod = f"{base}/ISAPI/Intelligent/FDLib/FDModify?format=json&FDID=1&faceLibType=blackFD"
+
+#     last = None
+#     for i in range(retries):
+#         try:
+#             enc = MultipartEncoder(fields=[
+#                 ("FaceDataRecord", (None, json.dumps(face_record), "application/json")),
+#                 ("img", ("face.jpg", jpg_bytes, "image/jpeg")),
+#             ])
+#             body = enc.to_string()
+#             ctype = enc.content_type
+
+#             r = requests.post(
+#                 url_rec,
+#                 auth=HTTPDigestAuth(CAMERA_USER, CAMERA_PASS),
+#                 data=body,
+#                 headers={"Content-Type": ctype},
+#                 timeout=30,
+#             )
+#             print(f"[face-upload] POST status={r.status_code} body={r.text[:300]}", flush=True)
+
+#             # Si ya existe → reintenta con Modify
+#             if r.status_code == 400 and ("exist" in r.text.lower() or "duplicate" in r.text.lower()):
+#                 r = requests.put(
+#                     url_mod,
+#                     auth=HTTPDigestAuth(CAMERA_USER, CAMERA_PASS),
+#                     data=body,
+#                     headers={"Content-Type": ctype},
+#                     timeout=30,
+#                 )
+#                 print(f"[face-upload] PUT status={r.status_code} body={r.text[:300]}", flush=True)
+
+#             r.raise_for_status()
+#             return r.json() if r.text else {}
+#         except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError) as e:
+#             last = e
+#             time.sleep(2 * (i + 1))
+#     raise last
+
 def upload_face(employee_no: str, jpg_bytes: bytes, ip: str = None, retries: int = 3) -> dict:
-    jpg_bytes = _shrink_jpg(jpg_bytes)
+    jpg_bytes = _shrink_jpg(jpg_bytes, max_kb=200, max_side=640)
     print(f"[face-upload] emp={employee_no} ip={ip} bytes={len(jpg_bytes)}", flush=True)
     base = _base_for(ip) if ip else BASE
-    face_record = {"faceLibType": "blackFD", "FDID": "1", "FPID": str(employee_no)}
 
-    # 1) Intentar Record (alta)
+    _wait_user_committed(employee_no, ip or BASE.split("//")[1])
+
+    face_record = {"faceLibType": "blackFD", "FDID": "1", "FPID": str(employee_no)}
     url_rec = f"{base}/ISAPI/Intelligent/FDLib/FaceDataRecord?format=json"
-    # 2) Si ya existe, Modify (update)
     url_mod = f"{base}/ISAPI/Intelligent/FDLib/FDModify?format=json&FDID=1&faceLibType=blackFD"
 
     last = None
@@ -239,13 +287,31 @@ def upload_face(employee_no: str, jpg_bytes: bytes, ip: str = None, retries: int
             )
             print(f"[face-upload] POST status={r.status_code} body={r.text[:300]}", flush=True)
 
-            # Si ya existe → reintenta con Modify
-            if r.status_code == 400 and ("exist" in r.text.lower() or "duplicate" in r.text.lower()):
+            need_modify = False
+            if r.status_code >= 400:
+                need_modify = True
+            else:
+                try:
+                    j = r.json()
+                    if j.get("statusCode") not in (1, None):
+                        sub = (j.get("subStatusCode") or "").lower()
+                        if "exist" in sub or "duplicate" in sub:
+                            need_modify = True
+                        else:
+                            raise RuntimeError(f"FaceDataRecord failed: {j}")
+                except ValueError:
+                    pass
+
+            if need_modify:
+                enc2 = MultipartEncoder(fields=[
+                    ("FaceDataRecord", (None, json.dumps(face_record), "application/json")),
+                    ("img", ("face.jpg", jpg_bytes, "image/jpeg")),
+                ])
                 r = requests.put(
                     url_mod,
                     auth=HTTPDigestAuth(CAMERA_USER, CAMERA_PASS),
-                    data=body,
-                    headers={"Content-Type": ctype},
+                    data=enc2.to_string(),
+                    headers={"Content-Type": enc2.content_type},
                     timeout=30,
                 )
                 print(f"[face-upload] PUT status={r.status_code} body={r.text[:300]}", flush=True)
@@ -268,7 +334,7 @@ def _deferred_upload_face(emp_no: str, ip: str, jpg: bytes, delay: int = 10):
     else:
         print(f"[face-upload] emp={emp_no} ip={ip} OK", flush=True)
         
-def _shrink_jpg(jpg_bytes: bytes, max_kb: int = 40, max_side: int = 480) -> bytes:
+def _shrink_jpg(jpg_bytes: bytes, max_kb: int = 200, max_side: int = 640) -> bytes:
     img = Image.open(BytesIO(jpg_bytes)).convert("RGB")
     w, h = img.size
     if max(w, h) > max_side:

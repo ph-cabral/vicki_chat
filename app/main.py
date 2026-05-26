@@ -126,14 +126,17 @@ async def handle_employee_flow(session_id: str, message: str,
                 SET photo_b64 = EXCLUDED.photo_b64, created_at = NOW()
             """, session_id, b64)
 
-            return (
+            # return (
             #     "📸 Foto capturada del reloj:\n\n"
             #     "Seleccioná sexo y ubicación, luego escribí el nombre."
             # )
-            # f"✅ {name_part} fué ingresado en el reloj de {location.lower()}\n\n"
-                f"![foto](data:image/jpeg;base64,{draft_b64})"
-            )
+            
             # return "✅ Foto tomada, ingresa datos..."
+            return (
+                "📸 Foto tomada:\n\n"
+                f"![foto](data:image/jpeg;base64,{b64})\n\n"
+                "Seleccioná sexo y ubicación, luego escribí el nombre."
+            )
         except Exception as e:
             return f"❌ Error tomando foto del reloj: {e}"
 
@@ -261,3 +264,11 @@ async def chat(request: ChatRequest):
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "chat-cv-agent"}
+
+
+@app.post("/cancel_employee/{session_id}")
+async def cancel_employee(session_id: str):
+    await db_pool.execute(
+        "DELETE FROM agent.employee_draft WHERE session_id = $1", session_id
+    )
+    return {"ok": True}
