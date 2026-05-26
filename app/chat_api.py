@@ -242,11 +242,12 @@ def handle_employee_flow(sid: str, uid: str, msg: str, gender: str = None, locat
             jpg = take_camera_snapshot()
             b64 = base64.b64encode(jpg).decode()
             save_draft(sid, b64)
-            return (
-                "📸 Foto capturada del reloj:\n\n"
-                f"![foto](data:image/jpeg;base64,{b64})\n\n"
-                "Seleccioná sexo y ubicación, luego escribí el nombre."
-            )
+            # return (
+            #     "📸 Foto capturada del reloj:\n\n"
+            #     f"![foto](data:image/jpeg;base64,{b64})\n\n"
+            #     "Seleccioná sexo y ubicación, luego escribí el nombre."
+            # )
+            return f" ✅ Foto tomada, ingresa datos... "
         except Exception as e:
             return f"❌ Error tomando foto del reloj: {e}"
 
@@ -268,14 +269,18 @@ def handle_employee_flow(sid: str, uid: str, msg: str, gender: str = None, locat
 
             emp_no, ip = create_employee(name=name_part, gender=gender_norm, location=location)
             try:
-                upload_face(emp_no, read_snapshot(), ip=ip, 10)
+                upload_face(emp_no, read_snapshot(), ip=ip)
                 delete_snapshot()
                 face_msg = "con foto cargada"
             except Exception as fe:
                 face_msg = f"⚠️ creado pero falló la foto: {fe}"
 
             del_draft(sid)
-            return f"✅ Empleado **{emp_no}** — {name_part} ({gender_norm}) @ {location.lower()} ({ip}) {face_msg}"
+            # return f"✅ Empleado **{emp_no}** — {name_part} ({gender_norm}) @ {location.lower()} ({ip}) {face_msg}"
+            return (
+                f"✅ {name_part} fué ingresado en el reloj de {location.lower()}\n\n"
+                f"![foto](data:image/jpeg;base64,{draft_b64})"
+            )
         except Exception as e:
             return f"❌ Error creando empleado: {e}"
 

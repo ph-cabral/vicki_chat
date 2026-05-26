@@ -8,6 +8,7 @@ import traceback
 import os
 import threading, time
 
+
 from langchain_core.messages import HumanMessage, AIMessage
 from app.graph import build_graph
 from app.config import config
@@ -18,14 +19,17 @@ from app.tools import SNAPSHOT_PATH
 from app.tool import take_camera_snapshot, create_employee, upload_face, resolve_location, read_snapshot, delete_snapshot, _deferred_upload_face
 from app.chat_api import del_draft
 
+
 app = FastAPI(
     title="Chat CV Agent",
     description="Agente de selección de personal — Basdonax AI",
     version="1.0.0",
 )
 
+
 os.makedirs("/code/snapshots", exist_ok=True)
 app.mount("/snapshots", StaticFiles(directory="/code/snapshots"), name="snapshots")
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -34,6 +38,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 graph = None
 db_pool = None
@@ -121,11 +126,11 @@ async def handle_employee_flow(session_id: str, message: str,
                 SET photo_b64 = EXCLUDED.photo_b64, created_at = NOW()
             """, session_id, b64)
 
-            return (
-                "📸 Foto capturada del reloj:\n\n"
-                f"![foto](data:image/jpeg;base64,{b64})\n\n"
-                "Seleccioná sexo y ubicación, luego escribí el nombre."
-            )
+            # return (
+            #     "📸 Foto capturada del reloj:\n\n"
+            #     "Seleccioná sexo y ubicación, luego escribí el nombre."
+            # )
+            return "✅ Foto tomada, ingresa datos..."
         except Exception as e:
             return f"❌ Error tomando foto del reloj: {e}"
 
@@ -164,8 +169,12 @@ async def handle_employee_flow(session_id: str, message: str,
                 foto_msg = f"foto pendiente ({e})"
 
             del_draft(session_id)
-            # return f"✅ Empleazdo **{emp_no}** — {name_part} ({gender_norm}) @ {location.lower()} ({ip}) — foto se subirá en 30s"
-            return f"✅ Empleado **{emp_no}** — {name_part} ({gender_norm}) @ {location.lower()} ({ip}) — {foto_msg}"
+            return f"✅ Empleazdo **{emp_no}** — {name_part} ({gender_norm}) @ {location.lower()} ({ip}) — foto se subirá en 30s"
+            # return (
+            #     f"✅ {name_part} fué ingresado en el reloj de {location.lower()}\n\n"
+            #     f"![foto](data:image/jpeg;base64,{draft_b64})"
+            # )
+            # return f"✅ Empleado **{emp_no}** — {name_part} ({gender_norm}) @ {location.lower()} ({ip}) — {foto_msg}"
         except Exception as e:
             return f"❌ Error creando empleado: {e}"
 
