@@ -28,7 +28,7 @@ LOCATIONS = {
     "Fabrica": "10.10.0.30",
     "Lilser":  "10.10.0.92",
 }
-DEFAULT_LOCATION = "fabrica"
+DEFAULT_LOCATION = "Oficina"
 
 # Compat: snapshot por defecto
 CAMERA_IP = os.getenv("CAMERA_IP", LOCATIONS[DEFAULT_LOCATION])

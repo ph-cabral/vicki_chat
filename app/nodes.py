@@ -3,12 +3,12 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from app.config import config
 from app.prompts import SYSTEM_PROMPT, ROUTER_PROMPT
-from app.tools import build_retriever_tool, take_camera_snapshot
+from app.tools import build_retriever_tool
 from app.graph_state import AgentState
 from langchain_anthropic import ChatAnthropic
 from app.config import config
 from app.prompts import SYSTEM_PROMPT, ROUTER_PROMPT
-
+from app.tool import take_camera_snapshot
 
 llm = ChatAnthropic(
     model=config.ANTHROPIC_MODEL,

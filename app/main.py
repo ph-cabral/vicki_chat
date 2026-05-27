@@ -6,7 +6,6 @@ import asyncpg
 import base64
 import traceback
 import os
-import threading, time
 
 
 from langchain_core.messages import HumanMessage, AIMessage
@@ -15,8 +14,7 @@ from app.config import config
 from app.memory import build_checkpointer
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from app.tools import SNAPSHOT_PATH
-from app.tool import take_camera_snapshot, create_employee, upload_face, resolve_location, read_snapshot, delete_snapshot, _deferred_upload_face
+from app.tool import take_camera_snapshot, create_employee, upload_face, resolve_location, read_snapshot, delete_snapshot
 from app.chat_api import del_draft
 
 
