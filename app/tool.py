@@ -1,19 +1,10 @@
-import requests
+import requests, subprocess, tempfile, base64, json, os, uuid, time
 from requests.auth import HTTPDigestAuth
 from requests_toolbelt.multipart.encoder import MultipartEncoder
-import subprocess
-import tempfile
-import base64
-import json
-import os
-import io
-import uuid
-import time
-import cv2, numpy as np
-import threading
-
+import cv2
 from io import BytesIO
 from PIL import Image
+
 
 _CASCADE = cv2.CascadeClassifier(
     cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
@@ -83,35 +74,6 @@ def snapshot_b64() -> str:
     return base64.b64encode(take_camera_snapshot()).decode()
 
 
-# def resize_face(jpg_bytes: bytes, max_side: int = 640, target_kb: int = 200) -> bytes:
-#     arr = np.frombuffer(jpg_bytes, np.uint8)
-#     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-#     if img is None:
-#         raise ValueError("snapshot ilegible")
-
-#     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-#     faces = _CASCADE.detectMultiScale(gray, 1.1, 5, minSize=(80, 80))
-#     if len(faces) == 0:
-#         raise ValueError("no se detectó rostro en el snapshot")
-
-#     x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
-
-#     mx, my = int(w * 0.4), int(h * 0.4)
-#     H, W = img.shape[:2]
-#     x0, y0 = max(0, x - mx), max(0, y - my)
-#     x1, y1 = min(W, x + w + mx), min(H, y + h + my)
-#     crop = img[y0:y1, x0:x1]
-
-#     pil = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
-#     pil.thumbnail((max_side, max_side))
-
-#     for q in (90, 80, 70, 60, 50):
-#         buf = io.BytesIO()
-#         pil.save(buf, "JPEG", quality=q)
-#         if buf.tell() <= target_kb * 1024:
-#             return buf.getvalue()
-#     return buf.getvalue()
-
 def resize_face(jpg_bytes: bytes, max_side: int = 480, target_kb: int = 60) -> bytes:
     with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as fin:
         fin.write(jpg_bytes); src = fin.name
@@ -163,6 +125,9 @@ def next_employee_no(ip: str = None) -> str:
     return str(max_no + 1)
 
 
+
+
+
 def create_employee(name: str, gender: str, location: str = DEFAULT_LOCATION, employee_no: str = None) -> tuple:
     ip = resolve_location(location)
     base = _base_for(ip)
@@ -208,54 +173,6 @@ def _wait_user_committed(employee_no: str, ip: str, retries: int = 8, delay: flo
         time.sleep(delay)
     return False
 
-
-# def upload_face(employee_no: str, jpg_bytes: bytes, ip: str = None, retries: int = 3) -> dict:
-#     jpg_bytes = _shrink_jpg(jpg_bytes)
-#     print(f"[face-upload] emp={employee_no} ip={ip} bytes={len(jpg_bytes)}", flush=True)
-#     base = _base_for(ip) if ip else BASE
-#     face_record = {"faceLibType": "blackFD", "FDID": "1", "FPID": str(employee_no)}
-
-#     # 1) Intentar Record (alta)
-#     url_rec = f"{base}/ISAPI/Intelligent/FDLib/FaceDataRecord?format=json"
-#     # 2) Si ya existe, Modify (update)
-#     url_mod = f"{base}/ISAPI/Intelligent/FDLib/FDModify?format=json&FDID=1&faceLibType=blackFD"
-
-#     last = None
-#     for i in range(retries):
-#         try:
-#             enc = MultipartEncoder(fields=[
-#                 ("FaceDataRecord", (None, json.dumps(face_record), "application/json")),
-#                 ("img", ("face.jpg", jpg_bytes, "image/jpeg")),
-#             ])
-#             body = enc.to_string()
-#             ctype = enc.content_type
-
-#             r = requests.post(
-#                 url_rec,
-#                 auth=HTTPDigestAuth(CAMERA_USER, CAMERA_PASS),
-#                 data=body,
-#                 headers={"Content-Type": ctype},
-#                 timeout=30,
-#             )
-#             print(f"[face-upload] POST status={r.status_code} body={r.text[:300]}", flush=True)
-
-#             # Si ya existe → reintenta con Modify
-#             if r.status_code == 400 and ("exist" in r.text.lower() or "duplicate" in r.text.lower()):
-#                 r = requests.put(
-#                     url_mod,
-#                     auth=HTTPDigestAuth(CAMERA_USER, CAMERA_PASS),
-#                     data=body,
-#                     headers={"Content-Type": ctype},
-#                     timeout=30,
-#                 )
-#                 print(f"[face-upload] PUT status={r.status_code} body={r.text[:300]}", flush=True)
-
-#             r.raise_for_status()
-#             return r.json() if r.text else {}
-#         except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError) as e:
-#             last = e
-#             time.sleep(2 * (i + 1))
-#     raise last
 
 def upload_face(employee_no: str, jpg_bytes: bytes, ip: str = None, retries: int = 3) -> dict:
     jpg_bytes = _shrink_jpg(jpg_bytes, max_kb=200, max_side=640)

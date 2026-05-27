@@ -1,13 +1,8 @@
+import asyncpg, base64, traceback, os
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
-import asyncpg
-import base64
-import traceback
-import os
-
-
 from langchain_core.messages import HumanMessage, AIMessage
 from app.graph import build_graph
 from app.config import config
@@ -16,7 +11,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from app.tool import take_camera_snapshot, create_employee, upload_face, resolve_location, read_snapshot, delete_snapshot
 from app.chat_api import del_draft
-
+from app.user_registry import reserve_user_id
 
 app = FastAPI(
     title="Chat CV Agent",
@@ -157,8 +152,14 @@ async def handle_employee_flow(session_id: str, message: str,
             except ValueError as ve:
                 return f"❌ {ve}"
 
-            emp_no, ip = create_employee(name=name_part, gender=gender_norm, location=location)
+            # emp_no, ip = create_employee(name=name_part, gender=gender_norm, location=location)
+            async with db_pool.acquire() as conn:
+                new_id = await reserve_user_id(conn, external_ref=f"vicki:{session_id}")
 
+            emp_no, ip = create_employee(
+                name=name_part, gender=gender_norm, location=location,
+                employee_no=str(new_id)
+            )
             jpg = read_snapshot()
             # threading.Thread(
             #     # target=_deferred_upload_face,
