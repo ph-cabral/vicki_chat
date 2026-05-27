@@ -24,9 +24,9 @@ CAMERA_PASS = os.getenv("CAMERA_PASS", "161982br")
 
 # Ubicación -> IP del reloj
 LOCATIONS = {
-    "oficina": "10.10.0.12",
-    "fabrica": "10.10.0.30",
-    "lilser":  "10.10.0.92",
+    "Oficina": "10.10.0.12",
+    "Fabrica": "10.10.0.30",
+    "Lilser":  "10.10.0.92",
 }
 DEFAULT_LOCATION = "fabrica"
 
