@@ -159,7 +159,17 @@ async def handle_employee_flow(session_id: str, message: str,
                 employee_no=str(new_id)
             )
 
+            SEXO_MAP = {"male": "M", "female": "F"}
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO everwear.legajo (codigo, \"employeeNo\", estado, apellido, nombre, sexo, \"createdAt\", \"updatedAt\") "
+                    "VALUES ($1,$1,'activo',$2,'',$3, now(), now()) "
+                    "ON CONFLICT (\"employeeNo\") DO NOTHING",
+                    emp_no, name_part, SEXO_MAP[gender_norm],
+                )
+
             jpg = read_snapshot()
+
             try:
                 upload_face(emp_no, jpg, ip=ip)
                 delete_snapshot()
