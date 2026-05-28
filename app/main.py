@@ -162,10 +162,10 @@ async def handle_employee_flow(session_id: str, message: str,
             SEXO_MAP = {"male": "M", "female": "F"}
             async with db_pool.acquire() as conn:
                 await conn.execute(
-                    "INSERT INTO everwear.legajo (codigo, \"employeeNo\", estado, apellido, nombre, sexo, \"createdAt\", \"updatedAt\") "
-                    "VALUES ($1,$1,'activo',$2,'',$3, now(), now()) "
-                    "ON CONFLICT (\"employeeNo\") DO NOTHING",
-                    emp_no, name_part, SEXO_MAP[gender_norm],
+                    'INSERT INTO everwear.legajo ("employeeNo", estado, apellido, nombre, sexo, "createdAt", "updatedAt") '
+                    "VALUES ($1::text, 'activo', $2::text, '', $3::text, now(), now()) "
+                    'ON CONFLICT ("employeeNo") DO NOTHING',
+                    str(emp_no), name_part, SEXO_MAP[gender_norm],
                 )
 
             jpg = read_snapshot()
@@ -179,6 +179,9 @@ async def handle_employee_flow(session_id: str, message: str,
             del_draft(session_id)
             return f"✅ {name_part} se creo en el reloj de {location.lower()}"
         except Exception as e:
+            await db_pool.execute(
+                "DELETE FROM agent.employee_draft WHERE session_id = $1", session_id
+            )
             return f"❌ Error creando empleado: {e}"
 
     return None
