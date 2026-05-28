@@ -15,11 +15,11 @@ CAMERA_PASS = os.getenv("CAMERA_PASS", "161982br")
 
 # Ubicación -> IP del reloj
 LOCATIONS = {
-    "Oficina": "10.10.0.12",
-    "Fabrica": "10.10.0.30",
-    "Lilser":  "10.10.0.92",
+    "oficina": "10.10.0.12",
+    "fabrica": "10.10.0.30",
+    "lilser":  "10.10.0.92",
 }
-DEFAULT_LOCATION = "Oficina"
+DEFAULT_LOCATION = "oficina"
 
 # Compat: snapshot por defecto
 CAMERA_IP = os.getenv("CAMERA_IP", LOCATIONS[DEFAULT_LOCATION])
@@ -47,16 +47,17 @@ SNAPSHOT_PATH = "/code/snapshots/foto.jpg"
 SNAPSHOT_DIR = "/code/snapshots"
 
 
-def take_camera_snapshot() -> bytes:
+def take_camera_snapshot(ip: str = None) -> bytes:
     os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+    target_ip = ip or CAMERA_IP
+    rtsp_url = f"rtsp://{CAMERA_USER}:{CAMERA_PASS}@{target_ip}:554/Streaming/Channels/101"
     subprocess.run(
-        ["ffmpeg", "-y", "-rtsp_transport", "tcp", "-i", RTSP,
+        ["ffmpeg", "-y", "-rtsp_transport", "tcp", "-i", rtsp_url,
          "-frames:v", "1", "-update", "1", "-q:v", "2", SNAPSHOT_PATH],
         check=True, timeout=15, capture_output=True,
     )
     with open(SNAPSHOT_PATH, "rb") as f:
         return f.read()
-
 
 def read_snapshot() -> bytes:
     with open(SNAPSHOT_PATH, "rb") as f:

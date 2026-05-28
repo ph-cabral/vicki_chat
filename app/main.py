@@ -96,21 +96,31 @@ async def history(session_id: str):
     return {"history": [{"role": r["role"], "content": r["content"]} for r in rows]}
 
 
-# ====== Flujo crear empleado ======
 async def handle_employee_flow(session_id: str, message: str,
                                gender: Optional[str] = None,
                                location: Optional[str] = None):
-    """Devuelve string si el mensaje cae en el flujo, o None."""
     text = message.strip()
     low = text.lower()
 
     triggers = ("/crea un empleado", "/crear un empleado", "/crea empleado",
                 "/crear empleado", "/crea", "/crear")
 
-    # Paso 1: disparador
-    if any(low == t or low.startswith(t + " ") or low == t for t in triggers) or low in triggers:
+    # Paso 1: disparador → pedir ubicación (sin tomar foto)
+    if any(low == t or low.startswith(t + " ") for t in triggers) or low in triggers:
+        return "📍 ¿Desde qué reloj querés sacar la foto?\n\n[LOC_PICK]"
+
+    # Paso 2: viene location SIN draft → tomar foto desde ese reloj
+    row = await db_pool.fetchrow(
+        "SELECT photo_b64 FROM agent.employee_draft WHERE session_id = $1",
+        session_id
+    )
+    if not row and location and not gender:
         try:
-            jpg = take_camera_snapshot()
+            ip = resolve_location(location)
+        except ValueError as ve:
+            return f"❌ {ve}"
+        try:
+            jpg = take_camera_snapshot(ip=ip)
             b64 = base64.b64encode(jpg).decode()
             await db_pool.execute("""
                 INSERT INTO agent.employee_draft (session_id, photo_b64)
@@ -118,26 +128,15 @@ async def handle_employee_flow(session_id: str, message: str,
                 ON CONFLICT (session_id) DO UPDATE
                 SET photo_b64 = EXCLUDED.photo_b64, created_at = NOW()
             """, session_id, b64)
-
-            # return (
-            #     "📸 Foto capturada del reloj:\n\n"
-            #     "Seleccioná sexo y ubicación, luego escribí el nombre."
-            # )
-            
-            # return "✅ Foto tomada, ingresa datos..."
             return (
-                "📸 Foto tomada:\n\n"
+                f"📸 Foto tomada desde {location}:\n\n"
                 f"![foto](data:image/jpeg;base64,{b64})\n\n"
-                "Seleccioná sexo y ubicación, luego escribí el nombre."
+                "Seleccioná sexo y escribí el nombre."
             )
         except Exception as e:
             return f"❌ Error tomando foto del reloj: {e}"
 
-    # Paso 2: hay draft + viene metadata estructurada → crear directo
-    row = await db_pool.fetchrow(
-        "SELECT photo_b64 FROM agent.employee_draft WHERE session_id = $1",
-        session_id
-    )
+    # Paso 3: hay draft + gender + location + nombre → crear
     if row and gender and location:
         try:
             g = (gender or "").strip().lower()
@@ -152,7 +151,6 @@ async def handle_employee_flow(session_id: str, message: str,
             except ValueError as ve:
                 return f"❌ {ve}"
 
-            # emp_no, ip = create_employee(name=name_part, gender=gender_norm, location=location)
             async with db_pool.acquire() as conn:
                 new_id = await reserve_user_id(conn, external_ref=f"vicki:{session_id}")
 
@@ -160,30 +158,22 @@ async def handle_employee_flow(session_id: str, message: str,
                 name=name_part, gender=gender_norm, location=location,
                 employee_no=str(new_id)
             )
+
             jpg = read_snapshot()
-            # threading.Thread(
-            #     # target=_deferred_upload_face,
-            #     args=(emp_no, ip, jpg, 3),
-            #     daemon=True,
-            # ).start()
             try:
                 upload_face(emp_no, jpg, ip=ip)
                 delete_snapshot()
-                foto_msg = "foto subida ✅"
             except Exception as e:
-                foto_msg = f"foto pendiente ({e})"
+                pass
 
             del_draft(session_id)
             return f"✅ {name_part} se creo en el reloj de {location.lower()}"
-            # return (
-            #     f"✅ {name_part} fué ingresado en el reloj de {location.lower()}\n\n"
-            #     f"![foto](data:image/jpeg;base64,{draft_b64})"
-            # )
-            # return f"✅ Empleado **{emp_no}** — {name_part} ({gender_norm}) @ {location.lower()} ({ip}) — {foto_msg}"
         except Exception as e:
             return f"❌ Error creando empleado: {e}"
 
     return None
+
+
 @app.get("/draft_status/{session_id}")
 async def draft_status(session_id: str):
     row = await db_pool.fetchrow(
