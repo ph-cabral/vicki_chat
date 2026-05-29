@@ -8,8 +8,14 @@ _client = Anthropic(api_key=config.ANTHROPIC_KEY)
 
 # Quita data-URIs base64 para no envenenar contexto/resumen
 def strip_b64(s: str) -> str:
-    return re.sub(r"!\[[^\]]*\]\(data:image/[^)]+\)", "📸[foto]", s or "")
+    # return re.sub(r"!\[[^\]]*\]\(data:image/[^)]+\)", "📸[foto]", s or "")
+    s = s or ""
+    s = re.sub(r"!\[[^\]]*\]\(data:image/[^)]+\)", "📸[foto]", s)   # markdown
+    s = re.sub(r"data:image/[A-Za-z]+;base64,[A-Za-z0-9+/=\s]+", "📸[foto]", s)  # data-uri suelto
+    s = re.sub(r"[A-Za-z0-9+/]{500,}={0,2}", "📸[blob]", s)          # base64 crudo largo
+    return s
 
+MAX_FOLD_CHARS = 60000 
 
 async def load_context(pool, session_id: str):
     """Devuelve lista de mensajes LangChain: [resumen?] + últimos KEEP_LAST."""
@@ -55,9 +61,10 @@ async def update_summary(pool, session_id: str):
         session_id,
     )
     prev_summary = srow["summary"] if srow else ""
+    prev_summary = (prev_summary or "")[:4000]
+
     watermark = srow["summarized_through"] if srow else None
 
-    # mensajes a plegar: anteriores a los últimos KEEP_LAST y posteriores al watermark
     rows = await pool.fetch(
         """
         WITH ranked AS (
@@ -78,6 +85,8 @@ async def update_summary(pool, session_id: str):
         f"{'Usuario' if r['role']=='human' else 'Asistente'}: {strip_b64(r['content'])}"
         for r in rows
     )
+    if len(fold_text) > MAX_FOLD_CHARS:
+        fold_text = fold_text[-MAX_FOLD_CHARS:]   
     new_summary = await asyncio.to_thread(_summarize_sync, prev_summary, fold_text)
     new_watermark = rows[-1]["created_at"]
 

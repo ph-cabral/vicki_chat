@@ -28,6 +28,8 @@ def build_retriever_tool():
         client=client,
         collection_name=config.QDRANT_COLLECTION,
         embedding=embeddings,
+        content_payload_key="content",
+        metadata_payload_key="metadata",
     )
 
     retriever = vector_store.as_retriever(

@@ -125,10 +125,6 @@ def next_employee_no(ip: str = None) -> str:
         pos += data.get("numOfMatches", 30)
     return str(max_no + 1)
 
-
-
-
-
 def create_employee(name: str, gender: str, location: str = DEFAULT_LOCATION, employee_no: str = None) -> tuple:
     ip = resolve_location(location)
     base = _base_for(ip)

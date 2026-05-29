@@ -3,7 +3,6 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
-from langchain_core.messages import HumanMessage, AIMessage
 from app.graph import build_graph
 from app.config import config
 from fastapi.responses import FileResponse
@@ -21,7 +20,6 @@ app = FastAPI(
     version="1.0.0",
 )
 
-
 os.makedirs("/code/snapshots", exist_ok=True)
 app.mount("/snapshots", StaticFiles(directory="/code/snapshots"), name="snapshots")
 
@@ -33,7 +31,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 graph = None
 db_pool = None
@@ -49,7 +46,6 @@ async def startup():
     global db_pool, graph
     
     try:
-        # 1. Crear pool con límites explícitos (evita fugas de conexiones)
         db_pool = await asyncpg.create_pool(
             config.DATABASE_URL,
             min_size=2,
@@ -63,14 +59,6 @@ async def startup():
         graph = build_graph().compile()
         logger.info("✅ Grafo compilado (sin checkpointer, historial vía load_context).")
 
-        # Tabla para draft de empleado en creación
-        # await db_pool.execute("""
-        #     CREATE TABLE IF NOT EXISTS agent.employee_draft (
-        #         session_id TEXT PRIMARY KEY,
-        #         photo_b64 TEXT NOT NULL,
-        #         created_at TIMESTAMP DEFAULT NOW()
-        #     )
-        # """)
         await db_pool.execute("""
                 CREATE TABLE IF NOT EXISTS agent.employee_draft (
                     session_id TEXT PRIMARY KEY,
@@ -163,9 +151,14 @@ async def handle_employee_flow(session_id: str, message: str,
                 SET photo_b64 = EXCLUDED.photo_b64, created_at = NOW()
             """, session_id, b64)
 
+            # return (
+            #     f"📸 Foto tomada desde {location}.\n\n"
+            #     f"![foto](/snapshot)\n\n"
+            #     "Seleccioná sexo y escribí el nombre."
+            # )
             return (
                 f"📸 Foto tomada desde {location}.\n\n"
-                f"![foto](/snapshot)\n\n"
+                f"![foto](data:image/jpeg;base64,{b64})\n\n"
                 "Seleccioná sexo y escribí el nombre."
             )
         except Exception as e:
@@ -197,8 +190,8 @@ async def handle_employee_flow(session_id: str, message: str,
             SEXO_MAP = {"male": "M", "female": "F"}
             async with db_pool.acquire() as conn:
                 await conn.execute(
-                    'INSERT INTO everwear.legajo ("employeeNo", estado, apellido, nombre, sexo, "createdAt", "updatedAt") '
-                    "VALUES ($1::text, 'activo', $2::text, '', $3::text, now(), now()) "
+                    'INSERT INTO everwear.legajo ("employeeNo", estado, nombre, sexo, "createdAt", "updatedAt") '
+                    "VALUES ($1::text, 'activo', $2::text, $3::text, now(), now()) "
                     'ON CONFLICT ("employeeNo") DO NOTHING',
                     str(emp_no), name_part, SEXO_MAP[gender_norm],
                 )
@@ -279,7 +272,7 @@ async def chat(request: ChatRequest):
         answer = result["final_response"]
         await db_pool.execute(
             "INSERT INTO agent.chat_messages (session_id, user_id, role, content) VALUES ($1, $2, $3, $4)",
-            session_id, user_id, "ai", answer
+            session_id, user_id, "ai", strip_b64(answer)
         )
         
         await update_summary(db_pool, session_id)
