@@ -1,4 +1,4 @@
-import asyncpg, base64, traceback, os
+import asyncpg, base64, traceback, os, logging
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -9,9 +9,12 @@ from app.config import config
 from app.memory import build_checkpointer
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from app.tool import take_camera_snapshot, create_employee, upload_face, resolve_location, read_snapshot, delete_snapshot
 from app.chat_api import del_draft
 from app.user_registry import reserve_user_id
+from app.summary import load_context, update_summary, strip_b64
+from app.tool import take_camera_snapshot, create_employee, upload_face, resolve_location, read_snapshot, delete_snapshot, SNAPSHOT_PATH
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Chat CV Agent",
@@ -45,19 +48,52 @@ def snapshot():
 @app.on_event("startup")
 async def startup():
     global db_pool, graph
-    db_pool = await asyncpg.create_pool(config.DATABASE_URL)
-    cp = await build_checkpointer()
-    graph = build_graph().compile(checkpointer=cp)
-
-    # Tabla para draft de empleado en creación
-    await db_pool.execute("""
-        CREATE TABLE IF NOT EXISTS agent.employee_draft (
-            session_id TEXT PRIMARY KEY,
-            photo_b64 TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT NOW()
+    
+    try:
+        # 1. Crear pool con límites explícitos (evita fugas de conexiones)
+        db_pool = await asyncpg.create_pool(
+            config.DATABASE_URL,
+            min_size=2,
+            max_size=10,
+            timeout=30,
+            command_timeout=60
         )
-    """)
+        logger.info("✅ Pool de base de datos creado correctamente.")
+        await db_pool.execute("CREATE SCHEMA IF NOT EXISTS agent")
+        db_pool = await asyncpg.create_pool(config.DATABASE_URL)
+        cp = await build_checkpointer()
+        graph = build_graph().compile(checkpointer=cp)
+        logger.info("✅ Grafo compilado con checkpointer.")
 
+        # Tabla para draft de empleado en creación
+        # await db_pool.execute("""
+        #     CREATE TABLE IF NOT EXISTS agent.employee_draft (
+        #         session_id TEXT PRIMARY KEY,
+        #         photo_b64 TEXT NOT NULL,
+        #         created_at TIMESTAMP DEFAULT NOW()
+        #     )
+        # """)
+        await db_pool.execute("""
+                CREATE TABLE IF NOT EXISTS agent.employee_draft (
+                    session_id TEXT PRIMARY KEY,
+                    photo_b64 TEXT NOT NULL,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+
+        await db_pool.execute("""
+            CREATE TABLE IF NOT EXISTS agent.chat_summary (
+                session_id TEXT PRIMARY KEY,
+                summary TEXT NOT NULL DEFAULT '',
+                summarized_through TIMESTAMPTZ,
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        logger.info("✅ Tablas verificadas/creadas.")
+    except Exception as e:
+        logger.error(f"❌ Error crítico en startup: {e}")
+        # En FastAPI/Starlette, lanzar la excepción detiene el inicio correctamente
+        raise
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -128,9 +164,10 @@ async def handle_employee_flow(session_id: str, message: str,
                 ON CONFLICT (session_id) DO UPDATE
                 SET photo_b64 = EXCLUDED.photo_b64, created_at = NOW()
             """, session_id, b64)
+
             return (
-                f"📸 Foto tomada desde {location}:\n\n"
-                f"![foto](data:image/jpeg;base64,{b64})\n\n"
+                f"📸 Foto tomada desde {location}.\n\n"
+                f"![foto](/snapshot)\n\n"
                 "Seleccioná sexo y escribí el nombre."
             )
         except Exception as e:
@@ -218,7 +255,7 @@ async def chat(request: ChatRequest):
             )
             await db_pool.execute(
                 "INSERT INTO agent.chat_messages (session_id, user_id, role, content) VALUES ($1, $2, $3, $4)",
-                session_id, user_id, "ai", emp_answer
+                session_id, user_id, "ai", strip_b64(emp_answer)
             )
             return ChatResponse(response=emp_answer, session_id=session_id, intent="employee")
 
@@ -228,16 +265,7 @@ async def chat(request: ChatRequest):
             session_id, user_id, "human", request.message
         )
 
-        rows = await db_pool.fetch(
-            "SELECT role, content FROM agent.chat_messages WHERE user_id = $1 ORDER BY created_at ASC",
-            user_id
-        )
-        history = []
-        for r in rows:
-            if r["role"] == "human":
-                history.append(HumanMessage(content=r["content"]))
-            else:
-                history.append(AIMessage(content=r["content"]))
+        history = await load_context(db_pool, session_id)
 
         graph_config = {"configurable": {"thread_id": session_id}}
         initial_state = {
@@ -251,11 +279,12 @@ async def chat(request: ChatRequest):
 
         result = await graph.ainvoke(initial_state, config=graph_config)
         answer = result["final_response"]
-
         await db_pool.execute(
             "INSERT INTO agent.chat_messages (session_id, user_id, role, content) VALUES ($1, $2, $3, $4)",
             session_id, user_id, "ai", answer
         )
+        
+        await update_summary(db_pool, session_id)
 
         return ChatResponse(
             response=answer,
