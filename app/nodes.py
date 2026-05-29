@@ -14,6 +14,9 @@ llm = ChatAnthropic(
     model=config.ANTHROPIC_MODEL,
     api_key=config.ANTHROPIC_KEY,
     temperature=0,
+    max_tokens=1024,
+    timeout=30,
+    max_retries=1,
 )
 
 retriever_tool = build_retriever_tool()
@@ -45,7 +48,9 @@ def off_topic_node(state: AgentState) -> AgentState:
 
 
 def rag_search_node(state: AgentState) -> AgentState:
+    print("[RAG] inicio", flush=True)
     docs = retriever_tool.func(state["user_message"])
+    print(f"[RAG] fin ({len(str(docs))} chars)", flush=True)
     return {**state, "retrieved_docs": docs}
 
 
@@ -71,8 +76,9 @@ def response_node(state: AgentState) -> AgentState:
         *state["messages"][:-1],
         HumanMessage(content=context_prompt),
     ]
-
+    print("[RESP] invoke LLM", flush=True)
     response = llm.invoke(messages)
+    print("[RESP] fin", flush=True)
 
     return {
         **state,

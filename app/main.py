@@ -6,7 +6,6 @@ from typing import Optional
 from langchain_core.messages import HumanMessage, AIMessage
 from app.graph import build_graph
 from app.config import config
-from app.memory import build_checkpointer
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from app.chat_api import del_draft
@@ -61,9 +60,8 @@ async def startup():
         logger.info("✅ Pool de base de datos creado correctamente.")
         await db_pool.execute("CREATE SCHEMA IF NOT EXISTS agent")
         db_pool = await asyncpg.create_pool(config.DATABASE_URL)
-        cp = await build_checkpointer()
-        graph = build_graph().compile(checkpointer=cp)
-        logger.info("✅ Grafo compilado con checkpointer.")
+        graph = build_graph().compile()
+        logger.info("✅ Grafo compilado (sin checkpointer, historial vía load_context).")
 
         # Tabla para draft de empleado en creación
         # await db_pool.execute("""

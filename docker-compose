@@ -38,6 +38,32 @@ services:
     volumes:
       - ./snapshots:/code/snapshots
 
+  chat-frontend:
+    build: .
+    container_name: viki_chat_frontend
+    restart: unless-stopped
+    command: streamlit run app/streamlit_app.py --server.port=8501 --server.address=0.0.0.0
+    ports:
+      - "8501:8501"
+    depends_on:
+      chat-agent:
+        condition: service_started
+    networks:
+      - ai-net
+
 networks:
   ai-net:
     external: true
+
+chat-frontend:
+    build: .
+    container_name: viki_chat_frontend
+    restart: unless-stopped
+    command: streamlit run app/streamlit_app.py --server.port=8501 --server.address=0.0.0.0
+    ports:
+      - "8501:8501"
+    depends_on:
+      chat-agent:
+        condition: service_started
+    networks:
+      - ai-net
