@@ -22,6 +22,14 @@ openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 qdrant = QdrantClient(url="http://n8n_qdrant:6333")
 
 
+class ChatRequest(BaseModel):
+    message: str
+    session_id: str = None
+    user_id: str = "1"
+    gender: str = None
+    location: str = None
+    retake: bool = False
+
 def get_db():
     return psycopg2.connect(
         host=os.getenv("DB_HOST", "n8n_sql"),
@@ -231,7 +239,67 @@ def llm_stream(system_prompt: str, messages: list):
 
 
 # ====== Manejador del flujo "crear empleado" ======
-def handle_employee_flow(sid: str, uid: str, msg: str, gender: str = None, location: str = None):
+# def handle_employee_flow(sid: str, uid: str, msg: str, gender: str = None, location: str = None):
+#     """Devuelve un string si el mensaje pertenece al flujo, o None."""
+#     text = msg.strip()
+#     low = text.lower()
+
+#     # Paso 1: disparador
+#     if low.startswith("/crea un empleado") or low.startswith("/crea empleado") or low == "/crea":
+#         try:
+#             jpg = take_camera_snapshot()
+#             b64 = base64.b64encode(jpg).decode()
+#             save_draft(sid, b64)
+#             # return (
+#             #     "📸 Foto capturada del reloj:\n\n"
+#             #     f"![foto](data:image/jpeg;base64,{b64})\n\n"
+#             #     "Seleccioná sexo y ubicación, luego escribí el nombre."
+#             # )
+#             # return f" ✅ Foto tomada, ingresa datos... "
+#             return (
+#                 "📸 Foto tomada:\n\n"
+#                 f"![foto](data:image/jpeg;base64,{b64})\n\n"
+#                 "Seleccioná sexo y ubicación, luego escribí el nombre."
+#             )
+#         except Exception as e:
+#             return f"❌ Error tomando foto del reloj: {e}"
+
+#     # Paso 2: hay draft + viene metadata estructurada → crear directo
+#     draft_b64 = get_draft(sid)
+#     if draft_b64 and gender and location:
+#         try:
+#             g = (gender or "").strip().lower()
+#             gender_norm = {"m": "male", "male": "male", "f": "female", "female": "female"}.get(g)
+#             if not gender_norm:
+#                 return "❌ Sexo inválido."
+#             name_part = text
+#             if not name_part:
+#                 return "❌ Falta el nombre."
+#             try:
+#                 resolve_location(location)
+#             except ValueError as ve:
+#                 return f"❌ {ve}"
+
+#             emp_no, ip = create_employee(name=name_part, gender=gender_norm, location=location)
+#             try:
+#                 upload_face(emp_no, read_snapshot(), ip=ip)
+#                 delete_snapshot()
+#                 face_msg = "con foto cargada"
+#             except Exception as fe:
+#                 face_msg = f"⚠️ creado pero falló la foto: {fe}"
+
+#             del_draft(sid)
+#             # return f"✅ Empleado **{emp_no}** — {name_part} ({gender_norm}) @ {location.lower()} ({ip}) {face_msg}"
+#             return (
+#                 f"✅ {name_part} fué ingresado en el reloj de {location.lower()}\n\n"
+#                 f"![foto](data:image/jpeg;base64,{draft_b64})"
+#             )
+#         except Exception as e:
+#             return f"❌ Error creando empleado: {e}"
+
+    # return None
+
+def handle_employee_flow(sid: str, uid: str, msg: str, gender: str = None, location: str = None, retake: bool = False):
     """Devuelve un string si el mensaje pertenece al flujo, o None."""
     text = msg.strip()
     low = text.lower()
@@ -242,12 +310,6 @@ def handle_employee_flow(sid: str, uid: str, msg: str, gender: str = None, locat
             jpg = take_camera_snapshot()
             b64 = base64.b64encode(jpg).decode()
             save_draft(sid, b64)
-            # return (
-            #     "📸 Foto capturada del reloj:\n\n"
-            #     f"![foto](data:image/jpeg;base64,{b64})\n\n"
-            #     "Seleccioná sexo y ubicación, luego escribí el nombre."
-            # )
-            # return f" ✅ Foto tomada, ingresa datos... "
             return (
                 "📸 Foto tomada:\n\n"
                 f"![foto](data:image/jpeg;base64,{b64})\n\n"
@@ -256,40 +318,20 @@ def handle_employee_flow(sid: str, uid: str, msg: str, gender: str = None, locat
         except Exception as e:
             return f"❌ Error tomando foto del reloj: {e}"
 
-    # Paso 2: hay draft + viene metadata estructurada → crear directo
-    draft_b64 = get_draft(sid)
-    if draft_b64 and gender and location:
+    # Paso 1b: re-tomar foto (botón "Sacar de nuevo")
+    if retake and get_draft(sid):
         try:
-            g = (gender or "").strip().lower()
-            gender_norm = {"m": "male", "male": "male", "f": "female", "female": "female"}.get(g)
-            if not gender_norm:
-                return "❌ Sexo inválido."
-            name_part = text
-            if not name_part:
-                return "❌ Falta el nombre."
-            try:
-                resolve_location(location)
-            except ValueError as ve:
-                return f"❌ {ve}"
-
-            emp_no, ip = create_employee(name=name_part, gender=gender_norm, location=location)
-            try:
-                upload_face(emp_no, read_snapshot(), ip=ip)
-                delete_snapshot()
-                face_msg = "con foto cargada"
-            except Exception as fe:
-                face_msg = f"⚠️ creado pero falló la foto: {fe}"
-
-            del_draft(sid)
-            # return f"✅ Empleado **{emp_no}** — {name_part} ({gender_norm}) @ {location.lower()} ({ip}) {face_msg}"
+            ip = resolve_location(location) if location else None
+            jpg = take_camera_snapshot(ip=ip)
+            b64 = base64.b64encode(jpg).decode()
+            save_draft(sid, b64)
             return (
-                f"✅ {name_part} fué ingresado en el reloj de {location.lower()}\n\n"
-                f"![foto](data:image/jpeg;base64,{draft_b64})"
+                "📸 Foto tomada:\n\n"
+                f"![foto](data:image/jpeg;base64,{b64})\n\n"
+                "Seleccioná sexo y ubicación, luego escribí el nombre."
             )
         except Exception as e:
-            return f"❌ Error creando empleado: {e}"
-
-    return None
+            return f"❌ Error tomando foto del reloj: {e}"
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -300,7 +342,8 @@ def chat(req: ChatRequest):
     ensure_session(sid, uid)
 
     # Flujo crear empleado (intercepta antes del LLM)
-    emp_answer = handle_employee_flow(sid, uid, req.message, req.gender, req.location)
+    emp_answer = handle_employee_flow(sid, uid, req.message, req.gender, req.location, req.retake)
+    # emp_answer = handle_employee_flow(sid, uid, req.message, req.gender, req.location)
     if emp_answer is not None:
         save_message(sid, uid, "human", req.message)
         save_message(sid, uid, "ai", emp_answer)
