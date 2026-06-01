@@ -99,14 +99,6 @@ Si no encontrás candidatos relevantes, decilo honestamente.
 Presentá los candidatos con nombre, experiencia relevante y por qué encajan en el puesto."""
 
 
-class ChatRequest(BaseModel):
-    message: str
-    session_id: str = None
-    user_id: str = "1"
-    gender: str = None
-    location: str = None
-
-
 class ChatResponse(BaseModel):
     response: str
     session_id: str
@@ -373,7 +365,7 @@ def chat_stream(req: ChatRequest):
     ensure_session(sid, uid)
 
     # Flujo crear empleado también en streaming
-    emp_answer = handle_employee_flow(sid, uid, req.message, req.gender, req.location)
+    emp_answer = handle_employee_flow(sid, uid, req.message, req.gender, req.location, req.retake)
     if emp_answer is not None:
         save_message(sid, uid, "human", req.message)
         save_message(sid, uid, "ai", emp_answer)
