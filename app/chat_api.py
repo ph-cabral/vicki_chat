@@ -301,6 +301,7 @@ def llm_stream(system_prompt: str, messages: list):
 
 def handle_employee_flow(sid: str, uid: str, msg: str, gender: str = None, location: str = None, retake: bool = False):
     """Devuelve un string si el mensaje pertenece al flujo, o None."""
+    print(f"[EMP] msg={msg!r} gender={gender} location={location} retake={retake}", flush=True)
     text = msg.strip()
     low = text.lower()
 
