@@ -152,6 +152,27 @@ def create_employee(name: str, gender: str, location: str = DEFAULT_LOCATION, em
     return employee_no, ip
 
 
+def create_employee_all(name: str, gender: str, employee_no: str) -> dict:
+    res = {}
+    for loc in LOCATIONS:
+        try:
+            create_employee(name=name, gender=gender, location=loc, employee_no=employee_no)
+            res[loc] = "ok"
+        except Exception as e:
+            res[loc] = f"error: {e}"
+    return res
+
+
+def upload_face_all(employee_no: str, jpg_bytes: bytes) -> dict:
+    res = {}
+    for loc, ip in LOCATIONS.items():
+        try:
+            upload_face(employee_no, jpg_bytes, ip=ip)
+            res[loc] = "ok"
+        except Exception as e:
+            res[loc] = f"error: {e}"
+    return res
+
 def _wait_user_committed(employee_no: str, ip: str, retries: int = 8, delay: float = 0.5) -> bool:
     base = _base_for(ip)
     url = f"{base}/ISAPI/AccessControl/UserInfo/Search?format=json"

@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from app.chat_api import del_draft
 from app.user_registry import reserve_user_id
 from app.summary import load_context, update_summary, strip_b64
-from app.tool import take_camera_snapshot, create_employee, upload_face, resolve_location, read_snapshot, delete_snapshot, SNAPSHOT_PATH
+from app.tool import take_camera_snapshot, create_employee, upload_face, resolve_location, read_snapshot, delete_snapshot, SNAPSHOT_PATH, create_employee_all, upload_face_all
 
 logger = logging.getLogger(__name__)
 
@@ -182,10 +182,33 @@ async def handle_employee_flow(session_id: str, message: str,
             async with db_pool.acquire() as conn:
                 new_id = await reserve_user_id(conn, external_ref=f"vicki:{session_id}")
 
-            emp_no, ip = create_employee(
-                name=name_part, gender=gender_norm, location=location,
-                employee_no=str(new_id)
-            )
+            # emp_no, ip = create_employee(
+            #     name=name_part, gender=gender_norm, location=location,
+            #     employee_no=str(new_id)
+            # )
+
+            # SEXO_MAP = {"male": "M", "female": "F"}
+            # async with db_pool.acquire() as conn:
+            #     await conn.execute(
+            #         'INSERT INTO everwear.legajo ("employeeNo", estado, nombre, sexo, "createdAt", "updatedAt") '
+            #         "VALUES ($1::text, 'activo', $2::text, $3::text, now(), now()) "
+            #         'ON CONFLICT ("employeeNo") DO NOTHING',
+            #         str(emp_no), name_part, SEXO_MAP[gender_norm],
+            #     )
+
+            # jpg = read_snapshot()
+
+            # try:
+            #     upload_face(emp_no, jpg, ip=ip)
+            #     delete_snapshot()
+            # except Exception as e:
+            #     pass
+
+            # del_draft(session_id)
+            # return f"✅ {name_part} se creo en el reloj de {location.lower()}"
+            
+            emp_no = str(new_id)
+            cre = create_employee_all(name=name_part, gender=gender_norm, employee_no=emp_no)
 
             SEXO_MAP = {"male": "M", "female": "F"}
             async with db_pool.acquire() as conn:
@@ -193,19 +216,20 @@ async def handle_employee_flow(session_id: str, message: str,
                     'INSERT INTO everwear.legajo ("employeeNo", estado, nombre, sexo, "createdAt", "updatedAt") '
                     "VALUES ($1::text, 'activo', $2::text, $3::text, now(), now()) "
                     'ON CONFLICT ("employeeNo") DO NOTHING',
-                    str(emp_no), name_part, SEXO_MAP[gender_norm],
+                    emp_no, name_part, SEXO_MAP[gender_norm],
                 )
 
             jpg = read_snapshot()
-
-            try:
-                upload_face(emp_no, jpg, ip=ip)
-                delete_snapshot()
-            except Exception as e:
-                pass
+            up = upload_face_all(emp_no, jpg)
+            delete_snapshot()
 
             del_draft(session_id)
-            return f"✅ {name_part} se creo en el reloj de {location.lower()}"
+            ok = [l for l, r in cre.items() if r == "ok"]
+            fail = {l: (cre[l], up.get(l)) for l in LOCATIONS if cre[l] != "ok" or up.get(l) != "ok"}
+            msg = f"✅ {name_part} creado en: {', '.join(ok) or 'ninguno'} (ID {emp_no})"
+            if fail:
+                msg += f"\n⚠️ Revisar: {fail}"
+            return msg
         except Exception as e:
             await db_pool.execute(
                 "DELETE FROM agent.employee_draft WHERE session_id = $1", session_id
