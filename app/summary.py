@@ -1,8 +1,14 @@
-import asyncio, re, os
+import asyncio
+import logging
+import os
+import re
+
 from anthropic import Anthropic
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
+
 from app.config import config
 
+log = logging.getLogger("summary")
 KEEP_LAST = 10
 _client = Anthropic(api_key=config.ANTHROPIC_KEY)
 
@@ -55,7 +61,15 @@ def _summarize_sync(prev_summary: str, fold_text: str) -> str:
 
 
 async def update_summary(pool, session_id: str):
-    """Pliega al resumen los mensajes que quedan fuera de los últimos KEEP_LAST."""
+    """Pliega al resumen los mensajes que quedan fuera de los últimos KEEP_LAST.
+    Nunca lanza: un fallo acá no debe romper el request de chat."""
+    try:
+        await _update_summary(pool, session_id)
+    except Exception:
+        log.exception(f"update_summary falló para {session_id}")
+
+
+async def _update_summary(pool, session_id: str):
     srow = await pool.fetchrow(
         "SELECT summary, summarized_through FROM agent.chat_summary WHERE session_id = $1",
         session_id,

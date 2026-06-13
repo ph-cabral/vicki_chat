@@ -1,14 +1,17 @@
+import logging
+import os
 from typing import Literal
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
-from app.config import config
-from app.prompts import SYSTEM_PROMPT, ROUTER_PROMPT
-from app.tools import build_retriever_tool
-from app.graph_state import AgentState
+
 from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
 from app.config import config
-from app.prompts import SYSTEM_PROMPT, ROUTER_PROMPT
+from app.graph_state import AgentState
+from app.prompts import ROUTER_PROMPT, SYSTEM_PROMPT
 from app.tool import take_camera_snapshot
+from app.tools import build_retriever_tool
+
+log = logging.getLogger("nodes")
 
 llm = ChatAnthropic(
     model=config.ANTHROPIC_MODEL,
@@ -16,24 +19,31 @@ llm = ChatAnthropic(
     temperature=0,
     max_tokens=1024,
     timeout=30,
-    max_retries=1,
+    max_retries=2,
 )
 
 retriever_tool = build_retriever_tool()
+
+VALID_INTENTS = {"search", "ranking", "camera", "off_topic"}
 
 
 def router_node(state: AgentState) -> AgentState:
     user_message = state["messages"][-1].content
     prompt = ROUTER_PROMPT.format(message=user_message)
-    response = llm.invoke([HumanMessage(content=prompt)])
-    intent = response.content.strip().lower()
-    
-    print(f"[ROUTER] mensaje: {user_message} → intent: {intent}", flush=True)  # agregá esto
-    
-    if intent not in ["search", "ranking", "camera", "off_topic"]:
+    try:
+        response = llm.invoke([HumanMessage(content=prompt)])
+        intent = response.content.strip().lower()
+    except Exception:
+        log.exception("router LLM falló; asumo search")
         intent = "search"
-    
+
+    log.info(f"[ROUTER] intent={intent} msg={user_message[:120]!r}")
+
+    if intent not in VALID_INTENTS:
+        intent = "search"
+
     return {**state, "intent": intent, "user_message": user_message}
+
 
 def off_topic_node(state: AgentState) -> AgentState:
     response = AIMessage(
@@ -48,16 +58,20 @@ def off_topic_node(state: AgentState) -> AgentState:
 
 
 def rag_search_node(state: AgentState) -> AgentState:
-    print("[RAG] inicio", flush=True)
-    docs = retriever_tool.func(state["user_message"])
-    print(f"[RAG] fin ({len(str(docs))} chars)", flush=True)
+    try:
+        docs = retriever_tool.func(state["user_message"])
+    except Exception as e:
+        # sin Qdrant/embeddings no hay contexto, pero no tiramos abajo el chat
+        log.exception("rag_search falló")
+        docs = f"(no se pudo consultar la base de CVs: {e})"
+    log.info(f"[RAG] {len(str(docs))} chars recuperados")
     return {**state, "retrieved_docs": docs}
 
 
 def response_node(state: AgentState) -> AgentState:
     intent = state.get("intent", "search")
     ranking_instruction = (
-        "Aplicá ranking por: años de experiencia en marketing, "
+        "Aplicá ranking por: años de experiencia relevante al puesto, "
         "especialización, seniority y estabilidad laboral."
         if intent == "ranking" else ""
     )
@@ -76,9 +90,7 @@ def response_node(state: AgentState) -> AgentState:
         *state["messages"][:-1],
         HumanMessage(content=context_prompt),
     ]
-    print("[RESP] invoke LLM", flush=True)
     response = llm.invoke(messages)
-    print("[RESP] fin", flush=True)
 
     return {
         **state,
@@ -98,8 +110,11 @@ def route_after_classification(state) -> Literal["rag_search", "off_topic", "cam
 
 def camera_node(state):
     try:
-        url = take_camera_snapshot()
+        take_camera_snapshot()  # escribe el JPG en SNAPSHOT_PATH (servido por /snapshot)
+        base = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
+        url = f"{base}/snapshot"
         state["final_response"] = f"📸 Acá está la foto:\n\n![snapshot]({url})"
     except Exception as e:
+        log.exception("camera_node falló")
         state["final_response"] = f"No pude acceder a la cámara: {e}"
     return state

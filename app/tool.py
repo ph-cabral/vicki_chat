@@ -1,24 +1,35 @@
-import requests, subprocess, tempfile, base64, json, os, uuid, time
+import base64
+import json
+import logging
+import os
+import subprocess
+import tempfile
+import time
+import uuid
+from io import BytesIO
+
+import requests
 from requests.auth import HTTPDigestAuth
 from requests_toolbelt.multipart.encoder import MultipartEncoder
-import cv2
-from io import BytesIO
 from PIL import Image
 
+log = logging.getLogger("tool")
 
-_CASCADE = cv2.CascadeClassifier(
-    cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-)
+# Credenciales de los relojes/cámaras: CAMERA_* o, si no están, HIK_* (las que pasa docker-compose).
+CAMERA_USER = os.getenv("CAMERA_USER") or os.getenv("HIK_USER", "admin")
+CAMERA_PASS = os.getenv("CAMERA_PASS") or os.getenv("HIK_PASS", "")
 
-CAMERA_USER = os.getenv("CAMERA_USER", "admin")
-CAMERA_PASS = os.getenv("CAMERA_PASS", "161982br")
-
-# Ubicación -> IP del reloj
-LOCATIONS = {
+# Ubicación -> IP del reloj (override por env: LOCATIONS_JSON='{"oficina":"10.10.0.12",...}')
+_DEFAULT_LOCATIONS = {
     "oficina": "10.10.0.12",
     "fabrica": "10.10.0.30",
     "lilser":  "10.10.0.92",
 }
+try:
+    LOCATIONS: dict[str, str] = json.loads(os.environ["LOCATIONS_JSON"]) if os.getenv("LOCATIONS_JSON") else dict(_DEFAULT_LOCATIONS)
+except (json.JSONDecodeError, TypeError):
+    log.error("LOCATIONS_JSON inválido; uso defaults")
+    LOCATIONS = dict(_DEFAULT_LOCATIONS)
 DEFAULT_LOCATION = "oficina"
 
 # Compat: snapshot por defecto
@@ -106,7 +117,7 @@ def next_employee_no(ip: str = None) -> str:
     max_no = 0
     pos = 0
     sid = str(uuid.uuid4())[:8]
-    while True:
+    for _ in range(5000):  # tope anti-loop si el firmware pagina mal
         body = {"UserInfoSearchCond": {
             "searchID": sid,
             "searchResultPosition": pos,
@@ -194,7 +205,7 @@ def _wait_user_committed(employee_no: str, ip: str, retries: int = 8, delay: flo
 
 def upload_face(employee_no: str, jpg_bytes: bytes, ip: str = None, retries: int = 3) -> dict:
     jpg_bytes = _shrink_jpg(jpg_bytes, max_kb=200, max_side=640)
-    print(f"[face-upload] emp={employee_no} ip={ip} bytes={len(jpg_bytes)}", flush=True)
+    log.info(f"[face-upload] emp={employee_no} ip={ip} bytes={len(jpg_bytes)}")
     base = _base_for(ip) if ip else BASE
 
     _wait_user_committed(employee_no, ip or BASE.split("//")[1])
@@ -220,7 +231,7 @@ def upload_face(employee_no: str, jpg_bytes: bytes, ip: str = None, retries: int
                 headers={"Content-Type": ctype},
                 timeout=30,
             )
-            print(f"[face-upload] POST status={r.status_code} body={r.text[:300]}", flush=True)
+            log.info(f"[face-upload] POST status={r.status_code} body={r.text[:300]}")
 
             need_modify = False
             if r.status_code >= 400:
@@ -249,7 +260,7 @@ def upload_face(employee_no: str, jpg_bytes: bytes, ip: str = None, retries: int
                     headers={"Content-Type": enc2.content_type},
                     timeout=30,
                 )
-                print(f"[face-upload] PUT status={r.status_code} body={r.text[:300]}", flush=True)
+                log.info(f"[face-upload] PUT status={r.status_code} body={r.text[:300]}")
 
             r.raise_for_status()
             return r.json() if r.text else {}
@@ -261,13 +272,12 @@ def upload_face(employee_no: str, jpg_bytes: bytes, ip: str = None, retries: int
 def _deferred_upload_face(emp_no: str, ip: str, jpg: bytes, delay: int = 10):
     time.sleep(delay)
     try:
-        from app.tool import upload_face, delete_snapshot
         upload_face(emp_no, jpg, ip=ip)
         delete_snapshot()
     except Exception as e:
-        print(f"[face-upload] emp={emp_no} ip={ip} FAIL: {e}", flush=True)
+        log.error(f"[face-upload] emp={emp_no} ip={ip} FAIL: {e}")
     else:
-        print(f"[face-upload] emp={emp_no} ip={ip} OK", flush=True)
+        log.info(f"[face-upload] emp={emp_no} ip={ip} OK")
         
 def _shrink_jpg(jpg_bytes: bytes, max_kb: int = 200, max_side: int = 640) -> bytes:
     img = Image.open(BytesIO(jpg_bytes)).convert("RGB")

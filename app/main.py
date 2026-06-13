@@ -1,72 +1,67 @@
-import asyncpg, base64, traceback, os, logging
+import asyncio
+import base64
+import logging
+import os
+from contextlib import asynccontextmanager
+from typing import Optional
+
+import asyncpg
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Optional
-from app.graph import build_graph
-from app.config import config
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from app.chat_api import del_draft
+from pydantic import BaseModel
+
+from app.config import config
+from app.graph import build_graph
+from app.summary import load_context, strip_b64, update_summary
+from app.tool import (
+    LOCATIONS,
+    SNAPSHOT_PATH,
+    create_employee_all,
+    resolve_location,
+    take_camera_snapshot,
+    upload_face_all,
+)
 from app.user_registry import reserve_user_id
-from app.summary import load_context, update_summary, strip_b64
-from app.tool import take_camera_snapshot, create_employee, upload_face, resolve_location, read_snapshot, delete_snapshot, SNAPSHOT_PATH, create_employee_all, upload_face_all
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(
-    title="Chat CV Agent",
-    description="Agente de selección de personal — Basdonax AI",
-    version="1.0.0",
-)
-
-os.makedirs("/code/snapshots", exist_ok=True)
-app.mount("/snapshots", StaticFiles(directory="/code/snapshots"), name="snapshots")
-
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 graph = None
-db_pool = None
+db_pool: asyncpg.Pool | None = None
+_bg_tasks: set = set()  # referencias fuertes para que el GC no cancele tareas en curso
 
 
-@app.get("/snapshot")
-def snapshot():
-    return FileResponse(SNAPSHOT_PATH, media_type="image/jpeg")
+def _spawn_bg(coro):
+    task = asyncio.create_task(coro)
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+    return task
 
 
-@app.on_event("startup")
-async def startup():
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
     global db_pool, graph
-    
     try:
         db_pool = await asyncpg.create_pool(
             config.DATABASE_URL,
             min_size=2,
             max_size=10,
             timeout=30,
-            command_timeout=60
+            command_timeout=60,
         )
         logger.info("✅ Pool de base de datos creado correctamente.")
         await db_pool.execute("CREATE SCHEMA IF NOT EXISTS agent")
-        db_pool = await asyncpg.create_pool(config.DATABASE_URL)
         graph = build_graph().compile()
         logger.info("✅ Grafo compilado (sin checkpointer, historial vía load_context).")
 
         await db_pool.execute("""
-                CREATE TABLE IF NOT EXISTS agent.employee_draft (
-                    session_id TEXT PRIMARY KEY,
-                    photo_b64 TEXT NOT NULL,
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                )
-            """)
-
+            CREATE TABLE IF NOT EXISTS agent.employee_draft (
+                session_id TEXT PRIMARY KEY,
+                photo_b64 TEXT NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
         await db_pool.execute("""
             CREATE TABLE IF NOT EXISTS agent.chat_summary (
                 session_id TEXT PRIMARY KEY,
@@ -78,12 +73,38 @@ async def startup():
         logger.info("✅ Tablas verificadas/creadas.")
     except Exception as e:
         logger.error(f"❌ Error crítico en startup: {e}")
-        # En FastAPI/Starlette, lanzar la excepción detiene el inicio correctamente
         raise
+    try:
+        yield
+    finally:
+        if db_pool is not None:
+            await db_pool.close()
 
-@app.on_event("shutdown")
-async def shutdown():
-    await db_pool.close()
+
+app = FastAPI(
+    title="Chat CV Agent",
+    description="Agente de selección de personal — Basdonax AI",
+    version="1.1.0",
+    lifespan=lifespan,
+)
+
+os.makedirs("/code/snapshots", exist_ok=True)
+app.mount("/snapshots", StaticFiles(directory="/code/snapshots"), name="snapshots")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=config.CORS_ORIGINS,
+    allow_credentials="*" not in config.CORS_ORIGINS,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/snapshot")
+def snapshot():
+    if not os.path.exists(SNAPSHOT_PATH):
+        raise HTTPException(404, "no hay snapshot disponible")
+    return FileResponse(SNAPSHOT_PATH, media_type="image/jpeg")
 
 
 class ChatRequest(BaseModel):
@@ -102,8 +123,14 @@ class ChatResponse(BaseModel):
 def user_id_from_session(session_id: str) -> int:
     try:
         return int(session_id.split("_")[1])
-    except:
+    except (IndexError, ValueError):
         return 1
+
+
+async def del_draft(session_id: str):
+    await db_pool.execute(
+        "DELETE FROM agent.employee_draft WHERE session_id = $1", session_id
+    )
 
 
 @app.get("/history/{session_id}")
@@ -128,7 +155,7 @@ async def handle_employee_flow(session_id: str, message: str,
                 "/crear empleado", "/crea", "/crear")
 
     # Paso 1: disparador → pedir ubicación (sin tomar foto)
-    if any(low == t or low.startswith(t + " ") for t in triggers) or low in triggers:
+    if any(low == t or low.startswith(t + " ") for t in triggers):
         return "📍 ¿Desde qué reloj querés sacar la foto?\n\n[LOC_PICK]"
 
     # Paso 2: viene location SIN draft → tomar foto desde ese reloj
@@ -142,7 +169,8 @@ async def handle_employee_flow(session_id: str, message: str,
         except ValueError as ve:
             return f"❌ {ve}"
         try:
-            jpg = take_camera_snapshot(ip=ip)
+            # la captura usa ffmpeg (bloqueante) → thread para no frenar el event loop
+            jpg = await asyncio.to_thread(take_camera_snapshot, ip)
             b64 = base64.b64encode(jpg).decode()
             await db_pool.execute("""
                 INSERT INTO agent.employee_draft (session_id, photo_b64)
@@ -150,18 +178,13 @@ async def handle_employee_flow(session_id: str, message: str,
                 ON CONFLICT (session_id) DO UPDATE
                 SET photo_b64 = EXCLUDED.photo_b64, created_at = NOW()
             """, session_id, b64)
-
-            # return (
-            #     f"📸 Foto tomada desde {location}.\n\n"
-            #     f"![foto](/snapshot)\n\n"
-            #     "Seleccioná sexo y escribí el nombre."
-            # )
             return (
                 f"📸 Foto tomada desde {location}.\n\n"
                 f"![foto](data:image/jpeg;base64,{b64})\n\n"
                 "Seleccioná sexo y escribí el nombre."
             )
         except Exception as e:
+            logger.exception("error tomando foto")
             return f"❌ Error tomando foto del reloj: {e}"
 
     # Paso 3: hay draft + gender + location + nombre → crear
@@ -182,33 +205,11 @@ async def handle_employee_flow(session_id: str, message: str,
             async with db_pool.acquire() as conn:
                 new_id = await reserve_user_id(conn, external_ref=f"vicki:{session_id}")
 
-            # emp_no, ip = create_employee(
-            #     name=name_part, gender=gender_norm, location=location,
-            #     employee_no=str(new_id)
-            # )
-
-            # SEXO_MAP = {"male": "M", "female": "F"}
-            # async with db_pool.acquire() as conn:
-            #     await conn.execute(
-            #         'INSERT INTO everwear.legajo ("employeeNo", estado, nombre, sexo, "createdAt", "updatedAt") '
-            #         "VALUES ($1::text, 'activo', $2::text, $3::text, now(), now()) "
-            #         'ON CONFLICT ("employeeNo") DO NOTHING',
-            #         str(emp_no), name_part, SEXO_MAP[gender_norm],
-            #     )
-
-            # jpg = read_snapshot()
-
-            # try:
-            #     upload_face(emp_no, jpg, ip=ip)
-            #     delete_snapshot()
-            # except Exception as e:
-            #     pass
-
-            # del_draft(session_id)
-            # return f"✅ {name_part} se creo en el reloj de {location.lower()}"
-            
             emp_no = str(new_id)
-            cre = create_employee_all(name=name_part, gender=gender_norm, employee_no=emp_no)
+            # alta en relojes: llamadas HTTP bloqueantes → thread
+            cre = await asyncio.to_thread(
+                create_employee_all, name_part, gender_norm, emp_no
+            )
 
             SEXO_MAP = {"male": "M", "female": "F"}
             async with db_pool.acquire() as conn:
@@ -219,11 +220,12 @@ async def handle_employee_flow(session_id: str, message: str,
                     emp_no, name_part, SEXO_MAP[gender_norm],
                 )
 
-            jpg = read_snapshot()
-            up = upload_face_all(emp_no, jpg)
-            delete_snapshot()
+            # usar la foto del draft (por sesión) y no el archivo global compartido:
+            # evita mezclar fotos si dos sesiones crean empleados a la vez
+            jpg = base64.b64decode(row["photo_b64"])
+            up = await asyncio.to_thread(upload_face_all, emp_no, jpg)
 
-            del_draft(session_id)
+            await del_draft(session_id)
             ok = [l for l, r in cre.items() if r == "ok"]
             fail = {l: (cre[l], up.get(l)) for l in LOCATIONS if cre[l] != "ok" or up.get(l) != "ok"}
             msg = f"✅ {name_part} creado en: {', '.join(ok) or 'ninguno'} (ID {emp_no})"
@@ -231,9 +233,8 @@ async def handle_employee_flow(session_id: str, message: str,
                 msg += f"\n⚠️ Revisar: {fail}"
             return msg
         except Exception as e:
-            await db_pool.execute(
-                "DELETE FROM agent.employee_draft WHERE session_id = $1", session_id
-            )
+            logger.exception("error creando empleado")
+            await del_draft(session_id)
             return f"❌ Error creando empleado: {e}"
 
     return None
@@ -245,6 +246,15 @@ async def draft_status(session_id: str):
         "SELECT 1 FROM agent.employee_draft WHERE session_id = $1", session_id
     )
     return {"has_draft": bool(row)}
+
+
+async def _update_summary_bg(session_id: str):
+    """Resumen en segundo plano: no demora la respuesta ni rompe el request."""
+    try:
+        await update_summary(db_pool, session_id)
+    except Exception:
+        logger.exception(f"update_summary falló para {session_id}")
+
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
@@ -298,8 +308,9 @@ async def chat(request: ChatRequest):
             "INSERT INTO agent.chat_messages (session_id, user_id, role, content) VALUES ($1, $2, $3, $4)",
             session_id, user_id, "ai", strip_b64(answer)
         )
-        
-        await update_summary(db_pool, session_id)
+
+        # antes esto bloqueaba la respuesta (y un fallo daba 500 con la respuesta ya generada)
+        _spawn_bg(_update_summary_bg(session_id))
 
         return ChatResponse(
             response=answer,
@@ -308,18 +319,23 @@ async def chat(request: ChatRequest):
         )
 
     except Exception as e:
-        traceback.print_exc()
+        logger.exception("chat falló")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "chat-cv-agent"}
+    db_ok = False
+    try:
+        if db_pool is not None:
+            await db_pool.fetchval("SELECT 1")
+            db_ok = True
+    except Exception:
+        logger.exception("health: DB caída")
+    return {"status": "ok" if db_ok else "degraded", "db": db_ok, "service": "chat-cv-agent"}
 
 
 @app.post("/cancel_employee/{session_id}")
 async def cancel_employee(session_id: str):
-    await db_pool.execute(
-        "DELETE FROM agent.employee_draft WHERE session_id = $1", session_id
-    )
+    await del_draft(session_id)
     return {"ok": True}

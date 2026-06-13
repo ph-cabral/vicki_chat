@@ -1,3 +1,6 @@
+"""API de chat legacy (versión sin LangGraph). El entrypoint productivo es app.main."""
+from typing import Optional
+
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -10,8 +13,7 @@ import os
 import json
 import base64
 import logging
-import threading, time
-from app.tool import take_camera_snapshot, create_employee, upload_face, resolve_location, read_snapshot, delete_snapshot, _deferred_upload_face
+from app.tool import take_camera_snapshot, resolve_location
 
 
 app = FastAPI()
@@ -19,15 +21,15 @@ log = logging.getLogger("uvicorn.error")
 
 anthropic_client = Anthropic(api_key=os.getenv("ANTHROPIC_KEY"))
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-qdrant = QdrantClient(url="http://n8n_qdrant:6333")
+qdrant = QdrantClient(url=os.getenv("QDRANT_URL", "http://n8n_qdrant:6333"))
 
 
 class ChatRequest(BaseModel):
     message: str
-    session_id: str = None
+    session_id: Optional[str] = None
     user_id: str = "1"
-    gender: str = None
-    location: str = None
+    gender: Optional[str] = None
+    location: Optional[str] = None
     retake: bool = False
 
 def get_db():
@@ -55,7 +57,14 @@ def ensure_employee_state_table():
     cur.close()
     db.close()
 
-ensure_employee_state_table()
+
+@app.on_event("startup")
+def _startup():
+    # antes corría al importar el módulo: si la DB estaba caída, el import explotaba
+    try:
+        ensure_employee_state_table()
+    except Exception:
+        log.exception("no pude verificar agent.employee_draft (sigo igual)")
 
 
 def save_draft(sid: str, photo_b64: str):
@@ -145,9 +154,16 @@ def load_history(session_id: str, user_id: str) -> list:
 
 
 def search_cvs(query: str, limit: int = 5) -> str:
-    resp = openai_client.embeddings.create(input=query, model="text-embedding-3-small")
-    vector = resp.data[0].embedding
-    results = qdrant.query_points("cvs", query=vector, limit=limit, with_payload=True)
+    try:
+        resp = openai_client.embeddings.create(input=query, model="text-embedding-3-small")
+        vector = resp.data[0].embedding
+        results = qdrant.query_points(
+            os.getenv("QDRANT_COLLECTION", "cvs"), query=vector, limit=limit, with_payload=True
+        )
+    except Exception:
+        # sin búsqueda vectorial el chat sigue funcionando, solo sin contexto de CVs
+        log.exception("search_cvs falló")
+        return ""
 
     context = ""
     for r in results.points:
@@ -231,69 +247,9 @@ def llm_stream(system_prompt: str, messages: list):
 
 
 # ====== Manejador del flujo "crear empleado" ======
-# def handle_employee_flow(sid: str, uid: str, msg: str, gender: str = None, location: str = None):
-#     """Devuelve un string si el mensaje pertenece al flujo, o None."""
-#     text = msg.strip()
-#     low = text.lower()
-
-#     # Paso 1: disparador
-#     if low.startswith("/crea un empleado") or low.startswith("/crea empleado") or low == "/crea":
-#         try:
-#             jpg = take_camera_snapshot()
-#             b64 = base64.b64encode(jpg).decode()
-#             save_draft(sid, b64)
-#             # return (
-#             #     "📸 Foto capturada del reloj:\n\n"
-#             #     f"![foto](data:image/jpeg;base64,{b64})\n\n"
-#             #     "Seleccioná sexo y ubicación, luego escribí el nombre."
-#             # )
-#             # return f" ✅ Foto tomada, ingresa datos... "
-#             return (
-#                 "📸 Foto tomada:\n\n"
-#                 f"![foto](data:image/jpeg;base64,{b64})\n\n"
-#                 "Seleccioná sexo y ubicación, luego escribí el nombre."
-#             )
-#         except Exception as e:
-#             return f"❌ Error tomando foto del reloj: {e}"
-
-#     # Paso 2: hay draft + viene metadata estructurada → crear directo
-#     draft_b64 = get_draft(sid)
-#     if draft_b64 and gender and location:
-#         try:
-#             g = (gender or "").strip().lower()
-#             gender_norm = {"m": "male", "male": "male", "f": "female", "female": "female"}.get(g)
-#             if not gender_norm:
-#                 return "❌ Sexo inválido."
-#             name_part = text
-#             if not name_part:
-#                 return "❌ Falta el nombre."
-#             try:
-#                 resolve_location(location)
-#             except ValueError as ve:
-#                 return f"❌ {ve}"
-
-#             emp_no, ip = create_employee(name=name_part, gender=gender_norm, location=location)
-#             try:
-#                 upload_face(emp_no, read_snapshot(), ip=ip)
-#                 delete_snapshot()
-#                 face_msg = "con foto cargada"
-#             except Exception as fe:
-#                 face_msg = f"⚠️ creado pero falló la foto: {fe}"
-
-#             del_draft(sid)
-#             # return f"✅ Empleado **{emp_no}** — {name_part} ({gender_norm}) @ {location.lower()} ({ip}) {face_msg}"
-#             return (
-#                 f"✅ {name_part} fué ingresado en el reloj de {location.lower()}\n\n"
-#                 f"![foto](data:image/jpeg;base64,{draft_b64})"
-#             )
-#         except Exception as e:
-#             return f"❌ Error creando empleado: {e}"
-
-    # return None
-
 def handle_employee_flow(sid: str, uid: str, msg: str, gender: str = None, location: str = None, retake: bool = False):
     """Devuelve un string si el mensaje pertenece al flujo, o None."""
-    print(f"[EMP] msg={msg!r} gender={gender} location={location} retake={retake}", flush=True)
+    log.info(f"[EMP] msg={msg!r} gender={gender} location={location} retake={retake}")
     text = msg.strip()
     low = text.lower()
 

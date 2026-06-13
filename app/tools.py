@@ -3,14 +3,6 @@ from langchain_openai import OpenAIEmbeddings
 from langchain_core.tools.retriever import create_retriever_tool
 from qdrant_client import QdrantClient
 from app.config import config
-import os
-
-
-CAMERA_IP = "10.10.0.12"
-CAMERA_USER = "admin"
-CAMERA_PASS = "161982br"
-SNAPSHOT_DIR = "/code/snapshots"
-PUBLIC_BASE = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000")
 
 
 def build_retriever_tool():
