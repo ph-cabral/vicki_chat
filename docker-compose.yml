@@ -29,7 +29,7 @@ services:
       CORS: ${CORS}
       PUBLIC_BASE_URL: http://10.10.0.159:8000
     networks:
-      - ai-net
+      - [ai-net]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 10s
