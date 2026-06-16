@@ -1,3 +1,5 @@
+# Reemplazo de app/graph_state.py
+# Agrega 'collections': colecciones de Qdrant que el router decidió consultar.
 from typing import Annotated, Optional
 from typing_extensions import TypedDict
 from langchain_core.messages import BaseMessage
@@ -8,7 +10,7 @@ class AgentState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     intent: Optional[str]
     user_message: Optional[str]
+    collections: Optional[list]          # ← colección(es) elegidas por el router
     retrieved_docs: Optional[str]
     final_response: Optional[str]
     session_id: Optional[str]
-

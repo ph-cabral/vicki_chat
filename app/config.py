@@ -35,7 +35,7 @@ class Config:
     ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
     QDRANT_URL: str = os.getenv("QDRANT_URL", "http://n8n_qdrant:6333")
     QDRANT_API_KEY: str = os.getenv("QDRANT_API_KEY", "")
-    QDRANT_COLLECTION: str = os.getenv("QDRANT_COLLECTION", "cvs")
+    QDRANT_COLLECTION: str = os.getenv("QDRANT_COLLECTION", "cvs")  # fallback si el router no elige
     MODEL_NAME: str = os.getenv("MODEL_NAME", "gpt-4.1-mini")
     TOP_K: int = int(os.getenv("TOP_K", "5"))
     CONTEXT_WINDOW: int = int(os.getenv("CONTEXT_WINDOW", "30"))
@@ -44,6 +44,11 @@ class Config:
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     # Sin default con credenciales hardcodeadas: tiene que venir del entorno.
     DATABASE_URL: str = _database_url()
+    # ── RAG / velocidad (nuevas) ──────────────────────────────────────────────
+    EMBED_MODEL: str = os.getenv("EMBED_MODEL", "text-embedding-3-small")
+    QDRANT_TIMEOUT: float = float(os.getenv("QDRANT_TIMEOUT", "10"))
+    QDRANT_CACHE_TTL: int = int(os.getenv("QDRANT_CACHE_TTL", "60"))  # cache de lista de colecciones
+    ROUTER_MAX_TOKENS: int = int(os.getenv("ROUTER_MAX_TOKENS", "200"))
 
 
 config = Config()
