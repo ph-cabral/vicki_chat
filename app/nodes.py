@@ -3,6 +3,7 @@ import os
 from typing import Literal
 
 from langchain_anthropic import ChatAnthropic
+from langchain_openai import ChatOpenAI
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from app.config import config
@@ -13,13 +14,39 @@ from app.tools import build_retriever_tool
 
 log = logging.getLogger("nodes")
 
-llm = ChatAnthropic(
-    model=config.ANTHROPIC_MODEL,
-    api_key=config.ANTHROPIC_KEY,
-    temperature=0,
-    max_tokens=1024,
-    timeout=30,
-    max_retries=2,
+
+class LLMWithFallback:
+    """OpenAI primario; si falla (ej. sin crédito), cae a Claude."""
+
+    def __init__(self, primary, fallback):
+        self.primary = primary
+        self.fallback = fallback
+
+    def invoke(self, messages):
+        try:
+            return self.primary.invoke(messages)
+        except Exception as e:
+            log.warning(f"OpenAI falló, fallback a Claude: {e}")
+            return self.fallback.invoke(messages)
+
+
+llm = LLMWithFallback(
+    primary=ChatOpenAI(
+        model=config.MODEL_NAME,
+        api_key=config.OPENAI_API_KEY,
+        temperature=0,
+        max_tokens=1024,
+        timeout=30,
+        max_retries=1,
+    ),
+    fallback=ChatAnthropic(
+        model=config.ANTHROPIC_MODEL,
+        api_key=config.ANTHROPIC_KEY,
+        temperature=0,
+        max_tokens=1024,
+        timeout=30,
+        max_retries=2,
+    ),
 )
 
 retriever_tool = build_retriever_tool()

@@ -4,6 +4,7 @@ import os
 import re
 
 from anthropic import Anthropic
+from openai import OpenAI
 from langchain_core.messages import AIMessage, HumanMessage
 
 from app.config import config
@@ -11,6 +12,7 @@ from app.config import config
 log = logging.getLogger("summary")
 KEEP_LAST = 10
 _client = Anthropic(api_key=config.ANTHROPIC_KEY)
+_openai_client = OpenAI(api_key=config.OPENAI_API_KEY)
 
 # Quita data-URIs base64 para no envenenar contexto/resumen
 def strip_b64(s: str) -> str:
@@ -52,12 +54,21 @@ def _summarize_sync(prev_summary: str, fold_text: str) -> str:
         f"RESUMEN ACTUAL:\n{prev_summary or '(vacío)'}\n\n"
         f"MENSAJES NUEVOS A INTEGRAR:\n{fold_text}\n\nRESUMEN ACTUALIZADO:"
     )
-    resp = _client.messages.create(
-        model=os.getenv("ANTHROPIC_MODEL", config.ANTHROPIC_MODEL),
-        max_tokens=400, temperature=0,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return resp.content[0].text.strip()
+    try:
+        resp = _openai_client.chat.completions.create(
+            model=config.MODEL_NAME,
+            max_tokens=400, temperature=0,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        log.warning(f"OpenAI falló en resumen, fallback a Claude: {e}")
+        resp = _client.messages.create(
+            model=os.getenv("ANTHROPIC_MODEL", config.ANTHROPIC_MODEL),
+            max_tokens=400, temperature=0,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return resp.content[0].text.strip()
 
 
 async def update_summary(pool, session_id: str):
