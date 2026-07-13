@@ -57,14 +57,24 @@ llm = LLMWithFallback(
     ),
 )
 
-# LLM del router: respuesta corta → menor latencia y costo
-router_llm = ChatAnthropic(
-    model=config.ANTHROPIC_MODEL,
-    api_key=config.ANTHROPIC_KEY,
-    temperature=0,
-    max_tokens=config.ROUTER_MAX_TOKENS,
-    timeout=15,
-    max_retries=1,
+# LLM del router: respuesta corta → menor latencia y costo. OpenAI primario, Claude fallback.
+router_llm = LLMWithFallback(
+    primary=ChatOpenAI(
+        model=config.MODEL_NAME,
+        api_key=config.OPENAI_API_KEY,
+        temperature=0,
+        max_tokens=config.ROUTER_MAX_TOKENS,
+        timeout=15,
+        max_retries=1,
+    ),
+    fallback=ChatAnthropic(
+        model=config.ANTHROPIC_MODEL,
+        api_key=config.ANTHROPIC_KEY,
+        temperature=0,
+        max_tokens=config.ROUTER_MAX_TOKENS,
+        timeout=15,
+        max_retries=1,
+    ),
 )
 
 VALID_INTENTS = {"search", "ranking", "camera", "general"}
