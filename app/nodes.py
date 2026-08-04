@@ -16,11 +16,37 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from app.config import config
 from app.graph_state import AgentState
-from app.prompts import ROUTER_PROMPT, SYSTEM_PROMPT
+from app.prompts import GROUNDING_RULES, ROUTER_PROMPT, SYSTEM_PROMPT
 from app.tool import take_camera_snapshot
 from app.tools import list_collections, search_collections
 
 log = logging.getLogger("nodes")
+
+# Extrae nombres de candidatos desde el bloque que arma _format_hit() en tools.py
+# ("--- Nombre Apellido (colección: ..., relevancia: ...) ---").
+_NAME_RE = re.compile(r"--- (.+?) \(colección:")
+
+
+def _extract_names(docs: str) -> list[str]:
+    seen: list[str] = []
+    for m in _NAME_RE.finditer(docs or ""):
+        n = m.group(1).strip()
+        if n and n not in seen:
+            seen.append(n)
+    return seen
+
+
+def _history_snippet(messages: list, max_pairs: int = 3) -> str:
+    """Últimos mensajes (sin el actual) para que el router pueda reformular
+    preguntas de seguimiento en una búsqueda autocontenida."""
+    prev = messages[:-1][-(max_pairs * 2):]
+    if not prev:
+        return "(sin mensajes previos)"
+    lines = []
+    for m in prev:
+        who = "Usuario" if isinstance(m, HumanMessage) else "Vicki"
+        lines.append(f"{who}: {m.content}")
+    return "\n".join(lines)
 
 
 class LLMWithFallback:
@@ -96,13 +122,17 @@ def router_node(state: AgentState) -> AgentState:
     prompt = ROUTER_PROMPT.format(
         message=user_message,
         collections=", ".join(cols) if cols else "(ninguna)",
+        history=_history_snippet(state["messages"]),
     )
-    intent, collections = "general", []
+    intent, collections, search_query = "general", [], user_message
     try:
         raw = router_llm.invoke([HumanMessage(content=prompt)]).content
         data = _safe_json(raw)
         intent = (data.get("intent") or "general").strip().lower()
         collections = [c for c in (data.get("collections") or []) if c in cols]
+        # Query reformulada (autocontenida) para embeber. Si el router no la
+        # devuelve, caemos al mensaje crudo (comportamiento anterior).
+        search_query = (data.get("query") or "").strip() or user_message
     except Exception:
         log.exception("router falló; asumo general")
 
@@ -111,8 +141,17 @@ def router_node(state: AgentState) -> AgentState:
     if intent in ("search", "ranking") and not collections:
         collections = [config.QDRANT_COLLECTION] if config.QDRANT_COLLECTION in cols else cols[:1]
 
-    log.info(f"[ROUTER] intent={intent} cols={collections} msg={user_message[:120]!r}")
-    return {**state, "intent": intent, "user_message": user_message, "collections": collections}
+    log.info(
+        f"[ROUTER] intent={intent} cols={collections} "
+        f"query={search_query[:120]!r} msg={user_message[:120]!r}"
+    )
+    return {
+        **state,
+        "intent": intent,
+        "user_message": user_message,
+        "search_query": search_query,
+        "collections": collections,
+    }
 
 
 def general_node(state: AgentState) -> AgentState:
@@ -127,12 +166,15 @@ def general_node(state: AgentState) -> AgentState:
 
 
 def rag_search_node(state: AgentState) -> AgentState:
+    # search_query es la versión reformulada por el router (autocontenida);
+    # si no vino, cae al mensaje crudo del usuario.
+    query = state.get("search_query") or state["user_message"]
     try:
-        docs = search_collections(state["user_message"], state.get("collections") or [])
+        docs = search_collections(query, state.get("collections") or [])
     except Exception:
         log.exception("rag_search falló")
         docs = ""
-    log.info(f"[RAG] cols={state.get('collections')} {len(str(docs))} chars")
+    log.info(f"[RAG] query={query[:120]!r} cols={state.get('collections')} {len(str(docs))} chars")
     return {**state, "retrieved_docs": docs}
 
 
@@ -145,10 +187,15 @@ def response_node(state: AgentState) -> AgentState:
     )
     docs = (state.get("retrieved_docs") or "").strip()
     cols = ", ".join(state.get("collections") or []) or "sin colección"
+    names = _extract_names(docs)
+    grounding = GROUNDING_RULES.format(
+        names=", ".join(names) if names else "(ninguno — no hay CVs en el contexto)"
+    )
     context_prompt = (
         f"## CVs encontrados ({cols}):\n"
         f"{docs if docs else '(no se encontraron CVs relevantes)'}\n\n"
         f"## Consulta del usuario:\n{state['user_message']}\n\n"
+        f"{grounding}\n"
         f"Respondé apoyándote en los CVs de arriba. No inventes datos. "
         f"Si no hay CVs relevantes, decilo.\n{ranking_instruction}"
     )

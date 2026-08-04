@@ -19,6 +19,7 @@ from app.tool import (
     LOCATIONS,
     SNAPSHOT_PATH,
     create_employee_all,
+    delete_employee_all,
     resolve_location,
     take_camera_snapshot,
     upload_face_all,
@@ -225,12 +226,22 @@ async def handle_employee_flow(session_id: str, message: str,
             jpg = base64.b64decode(row["photo_b64"])
             up = await asyncio.to_thread(upload_face_all, emp_no, jpg)
 
+            if any(r != "ok" for r in up.values()):
+                await asyncio.to_thread(delete_employee_all, emp_no)
+                async with db_pool.acquire() as conn:
+                    await conn.execute(
+                        'DELETE FROM everwear.legajo WHERE "employeeNo" = $1', emp_no
+                    )
+                await del_draft(session_id)
+                return (
+                    f"❌ Error subiendo la foto (acercate más a la cámara). "
+                    f"Se revirtió el alta en relojes y legajo. Reintentá /crear.\n"
+                    f"Detalle: {up}"
+                )
+
             await del_draft(session_id)
             ok = [l for l, r in cre.items() if r == "ok"]
-            fail = {l: (cre[l], up.get(l)) for l in LOCATIONS if cre[l] != "ok" or up.get(l) != "ok"}
             msg = f"✅ {name_part} creado en: {', '.join(ok) or 'ninguno'} (ID {emp_no})"
-            if fail:
-                msg += f"\n⚠️ Revisar: {fail}"
             return msg
         except Exception as e:
             logger.exception("error creando empleado")

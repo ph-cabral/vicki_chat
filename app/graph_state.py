@@ -10,6 +10,7 @@ class AgentState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     intent: Optional[str]
     user_message: Optional[str]
+    search_query: Optional[str]          # ← query reformulada (autocontenida) por el router
     collections: Optional[list]          # ← colección(es) elegidas por el router
     retrieved_docs: Optional[str]
     final_response: Optional[str]

@@ -168,8 +168,8 @@ def search_cvs(query: str, limit: int = 5) -> str:
     context = ""
     for r in results.points:
         meta = r.payload.get("metadata", {})
-        nombre = meta.get("candidato_nombre", "N/A")
-        email = meta.get("candidato_email", "N/A")
+        nombre = " ".join(x for x in [meta.get("nombre"), meta.get("apellido")] if x) or "N/A"
+        email = meta.get("email", "N/A")
         content = r.payload.get("content", "")
         empresas = meta.get("empresas", [])
 

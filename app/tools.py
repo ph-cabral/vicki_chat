@@ -59,8 +59,8 @@ def list_collections() -> list[str]:
 def _format_hit(col: str, p) -> str:
     payload = p.payload or {}
     meta = payload.get("metadata", {}) or {}
-    nombre = meta.get("candidato_nombre", "N/A")
-    email = meta.get("candidato_email", "N/A")
+    nombre = " ".join(x for x in [meta.get("nombre"), meta.get("apellido")] if x) or "N/A"
+    email = meta.get("email", "N/A")
     content = payload.get("content", "")
     empresas = meta.get("empresas", []) or []
     blk = [

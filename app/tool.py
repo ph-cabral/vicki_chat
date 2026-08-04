@@ -111,6 +111,13 @@ def _post_json(url: str, body: dict, timeout: int = 15) -> dict:
     return r.json() if r.text else {}
 
 
+def _put_json(url: str, body: dict, timeout: int = 15) -> dict:
+    payload = json.dumps(body)
+    r = requests.put(url, auth=_auth(), data=payload, headers=JSON_HDR, timeout=timeout)
+    r.raise_for_status()
+    return r.json() if r.text else {}
+
+
 def next_employee_no(ip: str = None) -> str:
     base = _base_for(ip) if ip else BASE
     url = f"{base}/ISAPI/AccessControl/UserInfo/Search?format=json"
@@ -183,6 +190,24 @@ def upload_face_all(employee_no: str, jpg_bytes: bytes) -> dict:
         except Exception as e:
             res[loc] = f"error: {e}"
     return res
+
+def delete_employee(employee_no: str, ip: str = None) -> dict:
+    base = _base_for(ip) if ip else BASE
+    url = f"{base}/ISAPI/AccessControl/UserInfo/Delete?format=json"
+    body = {"UserInfoDelCond": {"EmployeeNoList": [{"employeeNo": str(employee_no)}]}}
+    return _put_json(url, body)
+
+
+def delete_employee_all(employee_no: str) -> dict:
+    res = {}
+    for loc, ip in LOCATIONS.items():
+        try:
+            delete_employee(employee_no, ip=ip)
+            res[loc] = "ok"
+        except Exception as e:
+            res[loc] = f"error: {e}"
+    return res
+
 
 def _wait_user_committed(employee_no: str, ip: str, retries: int = 8, delay: float = 0.5) -> bool:
     base = _base_for(ip)
