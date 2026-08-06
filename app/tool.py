@@ -142,6 +142,63 @@ def next_employee_no(ip: str = None) -> str:
         pos += data.get("numOfMatches", 30)
     return str(max_no + 1)
 
+def list_users(ip: str) -> dict[str, str]:
+    """employeeNo -> nombre de todos los usuarios del reloj (paginado)."""
+    base = _base_for(ip)
+    url = f"{base}/ISAPI/AccessControl/UserInfo/Search?format=json"
+    out: dict[str, str] = {}
+    pos = 0
+    sid = str(uuid.uuid4())[:8]
+    for _ in range(5000):
+        body = {"UserInfoSearchCond": {
+            "searchID": sid, "searchResultPosition": pos, "maxResults": 30
+        }}
+        data = _post_json(url, body).get("UserInfoSearch", {})
+        lst = data.get("UserInfo", []) or []
+        for u in lst:
+            emp = str(u.get("employeeNo", "")).strip()
+            if emp:
+                out[emp] = (u.get("name", "") or "").strip()
+        if data.get("responseStatusStrg") != "MORE":
+            break
+        pos += data.get("numOfMatches", 30)
+    return out
+
+
+def find_employee(query: str) -> list[dict]:
+    """Busca en los 3 relojes por ID (exacto, con/sin pad a 8) o nombre
+    (substring, sin mayúsculas). Devuelve [{emp_no, nombre, relojes}]."""
+    q = (query or "").strip()
+    if not q:
+        return []
+    encontrados: dict[str, dict] = {}
+    for loc, ip in LOCATIONS.items():
+        try:
+            users = list_users(ip)
+        except Exception as e:
+            log.warning(f"[find_employee] {loc} no responde: {e}")
+            continue
+        for emp, nombre in users.items():
+            if q.isdigit():
+                hit = emp == q or emp == q.zfill(8) or emp.lstrip("0") == q.lstrip("0")
+            else:
+                hit = q.lower() in (nombre or "").lower()
+            if hit:
+                d = encontrados.setdefault(emp, {"emp_no": emp, "nombre": nombre, "relojes": []})
+                if nombre and not d["nombre"]:
+                    d["nombre"] = nombre
+                d["relojes"].append(loc)
+    return sorted(encontrados.values(), key=lambda d: d["emp_no"])
+
+
+def normalize_jpg(raw: bytes) -> bytes:
+    """Valida que sea una imagen y la devuelve como JPEG RGB. Lanza si no lo es."""
+    img = Image.open(BytesIO(raw)).convert("RGB")
+    buf = BytesIO()
+    img.save(buf, format="JPEG", quality=90)
+    return buf.getvalue()
+
+
 def create_employee(name: str, gender: str, location: str = DEFAULT_LOCATION, employee_no: str = None) -> tuple:
     ip = resolve_location(location)
     base = _base_for(ip)
