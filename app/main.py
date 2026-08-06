@@ -1,7 +1,9 @@
 import asyncio
 import base64
+import json
 import logging
 import os
+import unicodedata
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -71,9 +73,13 @@ async def lifespan(_app: FastAPI):
                 emp_no TEXT,
                 emp_nombre TEXT,
                 photo_b64 TEXT,
+                candidatos TEXT,
                 created_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
+        await db_pool.execute(
+            "ALTER TABLE agent.asignar_foto_draft ADD COLUMN IF NOT EXISTS candidatos TEXT"
+        )
         await db_pool.execute("""
             CREATE TABLE IF NOT EXISTS agent.chat_summary (
                 session_id TEXT PRIMARY KEY,
@@ -166,6 +172,43 @@ async def del_asignar_draft(session_id: str):
 CONFIRM_WORDS = {"si", "sí", "ok", "dale", "confirmar", "guardar"}
 CANCEL_WORDS = {"no", "cancelar", "cancela"}
 
+
+def _norm_txt(s: str) -> str:
+    """minúsculas y sin acentos (apto para respuestas por voz)."""
+    s = unicodedata.normalize("NFD", (s or "").strip().lower())
+    return "".join(c for c in s if not unicodedata.combining(c))
+
+
+def _pick_candidato(text: str, candidatos: list[dict]):
+    """Elige entre los candidatos guardados: ID literal exacto o nombre.
+    Devuelve (elegido, ambiguos)."""
+    q = (text or "").strip()
+    exactos = [c for c in candidatos if c["emp_no"] == q]
+    if len(exactos) == 1:
+        return exactos[0], None
+    qn = _norm_txt(q)
+    por_nombre = [c for c in candidatos if qn and qn in _norm_txt(c.get("nombre") or "")]
+    if len(por_nombre) == 1:
+        return por_nombre[0], None
+    if len(por_nombre) > 1:
+        return None, por_nombre
+    return None, None
+
+
+def _msg_candidatos(query: str, matches: list[dict]) -> str:
+    """Lista para desambiguar por nombre (apto voz) + botones en el chat."""
+    top = matches[:8]
+    lista = "\n".join(
+        f"- **{m['nombre'] or '(sin nombre)'}** (ID {m['emp_no']} — {', '.join(m['relojes']) if m.get('relojes') else 'guardado'})"
+        for m in top
+    )
+    extra = "" if len(matches) <= 8 else f"\n… y {len(matches) - 8} más, afiná la búsqueda."
+    nombres = "|".join((m["nombre"] or m["emp_no"]) for m in top)
+    return (
+        f"🔎 Encontré {len(matches)} con «{query}». ¿Cuál? Decime el nombre:\n\n"
+        f"{lista}{extra}\n\n[NAME_PICK:{nombres}]"
+    )
+
 MSG_PEDIR_FOTO = (
     "📷 Foto para **{nombre}** (ID {emp}).\n\n"
     "Elegí un reloj para sacarla, o subí una imagen.\n\n[LOC_PICK][UPLOAD_PICK]"
@@ -188,7 +231,7 @@ async def handle_assign_photo_flow(session_id: str, message: str,
     trigger = next((t for t in triggers if low == t or low.startswith(t + " ")), None)
 
     row = await db_pool.fetchrow(
-        "SELECT emp_no, emp_nombre, photo_b64 FROM agent.asignar_foto_draft "
+        "SELECT emp_no, emp_nombre, photo_b64, candidatos FROM agent.asignar_foto_draft "
         "WHERE session_id = $1", session_id
     )
 
@@ -212,31 +255,45 @@ async def handle_assign_photo_flow(session_id: str, message: str,
             "INSERT INTO agent.asignar_foto_draft (session_id) VALUES ($1)",
             session_id,
         )
-        row = {"emp_no": None, "emp_nombre": None, "photo_b64": None}
+        row = {"emp_no": None, "emp_nombre": None, "photo_b64": None, "candidatos": None}
         text, low = resto, resto.lower()
 
     if not row:
         return None  # flujo no activo
 
-    # Paso 1: falta elegir empleado → el mensaje es la búsqueda
+    # Paso 1: falta elegir empleado → el mensaje es la búsqueda (o la elección)
     if not row["emp_no"]:
+
+        async def _seleccionar(m: dict) -> str:
+            await db_pool.execute(
+                "UPDATE agent.asignar_foto_draft SET emp_no = $2, emp_nombre = $3, "
+                "candidatos = NULL WHERE session_id = $1",
+                session_id, m["emp_no"], m.get("nombre") or m["emp_no"],
+            )
+            return MSG_PEDIR_FOTO.format(nombre=m.get("nombre") or m["emp_no"], emp=m["emp_no"])
+
+        # ¿Había candidatos pendientes? → interpretar la respuesta como elección
+        candidatos = json.loads(row["candidatos"]) if row["candidatos"] else None
+        if candidatos:
+            elegido, ambiguos = _pick_candidato(text, candidatos)
+            if elegido:
+                return await _seleccionar(elegido)
+            if ambiguos:
+                return _msg_candidatos(text, ambiguos)
+            # no matchea ningún candidato → lo tomo como búsqueda nueva
+
         matches = find_employee(text)
         if not matches:
             return f"❌ No encontré ningún empleado con «{text}». Probá con el ID o parte del nombre."
         if len(matches) > 1:
-            lista = "\n".join(
-                f"- **{m['emp_no']}** — {m['nombre'] or '(sin nombre)'} ({', '.join(m['relojes'])})"
-                for m in matches[:8]
+            await db_pool.execute(
+                "UPDATE agent.asignar_foto_draft SET candidatos = $2 WHERE session_id = $1",
+                session_id,
+                json.dumps([{"emp_no": m["emp_no"], "nombre": m["nombre"],
+                             "relojes": m["relojes"]} for m in matches[:8]]),
             )
-            extra = "" if len(matches) <= 8 else f"\n… y {len(matches) - 8} más."
-            return f"Encontré varios, escribí el ID exacto:\n\n{lista}{extra}"
-        m = matches[0]
-        await db_pool.execute(
-            "UPDATE agent.asignar_foto_draft SET emp_no = $2, emp_nombre = $3 "
-            "WHERE session_id = $1",
-            session_id, m["emp_no"], m["nombre"] or m["emp_no"],
-        )
-        return MSG_PEDIR_FOTO.format(nombre=m["nombre"] or m["emp_no"], emp=m["emp_no"])
+            return _msg_candidatos(text, matches)
+        return await _seleccionar(matches[0])
 
     emp_no, nombre = row["emp_no"], row["emp_nombre"] or row["emp_no"]
 
