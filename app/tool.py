@@ -10,7 +10,6 @@ from io import BytesIO
 
 import requests
 from requests.auth import HTTPDigestAuth
-from requests_toolbelt.multipart.encoder import MultipartEncoder
 from PIL import Image
 
 log = logging.getLogger("tool")
@@ -191,8 +190,26 @@ def upload_face_all(employee_no: str, jpg_bytes: bytes) -> dict:
             res[loc] = f"error: {e}"
     return res
 
+def _delete_face(base: str, employee_no: str, timeout: int = 15) -> requests.Response:
+    """Borra el rostro (FPID) de la FDLib. Necesario porque UserInfo/Delete NO
+    limpia la FDLib: el rostro huérfano bloquea el próximo FaceDataRecord con
+    el mismo ID ("face exist"), y FDModify devuelve 400 en este firmware."""
+    url = (f"{base}/ISAPI/Intelligent/FDLib/FDSearch/Delete"
+           f"?format=json&FDID=1&faceLibType=blackFD")
+    body = {"FPID": [{"value": str(employee_no)}]}
+    r = requests.put(url, auth=_auth(), data=json.dumps(body),
+                     headers=JSON_HDR, timeout=timeout)
+    log.info(f"[face-delete] emp={employee_no} {base} status={r.status_code} body={r.text[:200]}")
+    return r
+
+
 def delete_employee(employee_no: str, ip: str = None) -> dict:
     base = _base_for(ip) if ip else BASE
+    # rostro primero (best-effort): si queda huérfano, el ID no se puede reusar
+    try:
+        _delete_face(base, employee_no)
+    except requests.RequestException as e:
+        log.warning(f"[face-delete] emp={employee_no} {base} falló: {e}")
     url = f"{base}/ISAPI/AccessControl/UserInfo/Delete?format=json"
     body = {"UserInfoDelCond": {"EmployeeNoList": [{"employeeNo": str(employee_no)}]}}
     return _put_json(url, body)
@@ -229,6 +246,10 @@ def _wait_user_committed(employee_no: str, ip: str, retries: int = 8, delay: flo
 
 
 def upload_face(employee_no: str, jpg_bytes: bytes, ip: str = None, retries: int = 3) -> dict:
+    """Sube el rostro vía FaceDataRecord (único endpoint que este firmware
+    acepta — FDSetUp/UserFace/FDModify devuelven notSupport/400, ver
+    hikvsion_get_events/app/enrolar_fotos.py). Si el FPID ya tiene rostro
+    (huérfano de un alta revertida), lo borra y re-sube una vez."""
     jpg_bytes = _shrink_jpg(jpg_bytes, max_kb=200, max_side=640)
     log.info(f"[face-upload] emp={employee_no} ip={ip} bytes={len(jpg_bytes)}")
     base = _base_for(ip) if ip else BASE
@@ -237,62 +258,43 @@ def upload_face(employee_no: str, jpg_bytes: bytes, ip: str = None, retries: int
 
     face_record = {"faceLibType": "blackFD", "FDID": "1", "FPID": str(employee_no)}
     url_rec = f"{base}/ISAPI/Intelligent/FDLib/FaceDataRecord?format=json"
-    url_mod = f"{base}/ISAPI/Intelligent/FDLib/FDModify?format=json&FDID=1&faceLibType=blackFD"
+    # mismo patrón multipart que asignar_foto.py (verificado contra estos relojes)
+    files = {
+        "FaceDataRecord": (None, json.dumps(face_record), "application/json"),
+        "img": ("face.jpg", jpg_bytes, "image/jpeg"),
+    }
 
     last = None
+    face_deleted = False
     for i in range(retries):
         try:
-            enc = MultipartEncoder(fields=[
-                ("FaceDataRecord", (None, json.dumps(face_record), "application/json")),
-                ("img", ("face.jpg", jpg_bytes, "image/jpeg")),
-            ])
-            body = enc.to_string()
-            ctype = enc.content_type
+            r = requests.post(url_rec, auth=_auth(), files=files, timeout=30)
+            body = r.text or ""
+            log.info(f"[face-upload] POST status={r.status_code} body={body[:300]}")
 
-            r = requests.post(
-                url_rec,
-                auth=HTTPDigestAuth(CAMERA_USER, CAMERA_PASS),
-                data=body,
-                headers={"Content-Type": ctype},
-                timeout=30,
-            )
-            log.info(f"[face-upload] POST status={r.status_code} body={r.text[:300]}")
-
-            need_modify = False
-            if r.status_code >= 400:
-                need_modify = True
-            else:
+            ok = False
+            if r.status_code < 400:
                 try:
-                    j = r.json()
-                    if j.get("statusCode") not in (1, None):
-                        sub = (j.get("subStatusCode") or "").lower()
-                        if "exist" in sub or "duplicate" in sub:
-                            need_modify = True
-                        else:
-                            raise RuntimeError(f"FaceDataRecord failed: {j}")
+                    ok = r.json().get("statusCode") in (1, None)
                 except ValueError:
-                    pass
+                    ok = True  # 200 sin JSON
+            if ok:
+                return r.json() if r.text else {}
 
-            if need_modify:
-                enc2 = MultipartEncoder(fields=[
-                    ("FaceDataRecord", (None, json.dumps(face_record), "application/json")),
-                    ("img", ("face.jpg", jpg_bytes, "image/jpeg")),
-                ])
-                r = requests.put(
-                    url_mod,
-                    auth=HTTPDigestAuth(CAMERA_USER, CAMERA_PASS),
-                    data=enc2.to_string(),
-                    headers={"Content-Type": enc2.content_type},
-                    timeout=30,
-                )
-                log.info(f"[face-upload] PUT status={r.status_code} body={r.text[:300]}")
+            # rostro ya cargado para ese FPID → borrar y reintentar (una vez)
+            low = body.lower()
+            if not face_deleted and ("exist" in low or "duplicate" in low):
+                _delete_face(base, employee_no)
+                face_deleted = True
+                time.sleep(0.5)
+                continue
 
-            r.raise_for_status()
-            return r.json() if r.text else {}
+            # error real del reloj visible en el mensaje (antes lo tapaba FDModify)
+            raise RuntimeError(f"FaceDataRecord {r.status_code} en {base}: {body[:300]}")
         except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError) as e:
             last = e
             time.sleep(2 * (i + 1))
-    raise last
+    raise last if last else RuntimeError(f"upload_face agotó reintentos en {base}")
 
 def _deferred_upload_face(emp_no: str, ip: str, jpg: bytes, delay: int = 10):
     time.sleep(delay)
