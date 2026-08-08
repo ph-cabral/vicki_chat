@@ -121,15 +121,13 @@ def router_node(state: AgentState) -> AgentState:
     cols = list_collections()
     prompt = ROUTER_PROMPT.format(
         message=user_message,
-        collections=", ".join(cols) if cols else "(ninguna)",
         history=_history_snippet(state["messages"]),
     )
-    intent, collections, search_query = "general", [], user_message
+    intent, search_query = "general", user_message
     try:
         raw = router_llm.invoke([HumanMessage(content=prompt)]).content
         data = _safe_json(raw)
         intent = (data.get("intent") or "general").strip().lower()
-        collections = [c for c in (data.get("collections") or []) if c in cols]
         # Query reformulada (autocontenida) para embeber. Si el router no la
         # devuelve, caemos al mensaje crudo (comportamiento anterior).
         search_query = (data.get("query") or "").strip() or user_message
@@ -138,8 +136,15 @@ def router_node(state: AgentState) -> AgentState:
 
     if intent not in VALID_INTENTS:
         intent = "general"
-    if intent in ("search", "ranking") and not collections:
-        collections = [config.QDRANT_COLLECTION] if config.QDRANT_COLLECTION in cols else cols[:1]
+    # Buscar SIEMPRE en todas las colecciones disponibles para search/ranking.
+    # Antes el LLM elegía la(s) colección(es) "más afín(es)" y esa elección
+    # dependía de cómo estaba redactada la pregunta: "vendedor viajante para
+    # zona de Córdoba" podía no elegir la colección correcta y devolver "no
+    # tengo candidatos", mientras que "para viajante" sí la elegía y
+    # aparecían los mismos candidatos que ya estaban cargados. Con pocas
+    # colecciones de CVs, buscar en todas (en paralelo, ver tools.py) es más
+    # barato que el riesgo de una respuesta contradictoria.
+    collections = cols if intent in ("search", "ranking") else []
 
     log.info(
         f"[ROUTER] intent={intent} cols={collections} "
@@ -197,7 +202,11 @@ def response_node(state: AgentState) -> AgentState:
         f"## Consulta del usuario:\n{state['user_message']}\n\n"
         f"{grounding}\n"
         f"Respondé apoyándote en los CVs de arriba. No inventes datos. "
-        f"Si no hay CVs relevantes, decilo.\n{ranking_instruction}"
+        f"Si hay candidatos en la lista aunque matcheen solo parcialmente, "
+        f"mostralos igual aclarando qué les falta — no cierres con un 'no "
+        f"tengo nada' habiendo candidatos en: {', '.join(names) if names else '(ninguno)'}. "
+        f"Si de verdad no hay ningún CV relevante, decilo y ofrecé ampliar la "
+        f"búsqueda (otra zona, rubro afín, menos experiencia).\n{ranking_instruction}"
     )
     messages = [
         SystemMessage(content=SYSTEM_PROMPT),

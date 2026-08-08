@@ -1,5 +1,6 @@
 # Reemplazo de app/graph_state.py
-# Agrega 'collections': colecciones de Qdrant que el router decidió consultar.
+# 'collections': para intent search/ranking son TODAS las colecciones
+# disponibles (ya no las elige el router — ver nodes.py::router_node).
 from typing import Annotated, Optional
 from typing_extensions import TypedDict
 from langchain_core.messages import BaseMessage
@@ -11,7 +12,7 @@ class AgentState(TypedDict):
     intent: Optional[str]
     user_message: Optional[str]
     search_query: Optional[str]          # ← query reformulada (autocontenida) por el router
-    collections: Optional[list]          # ← colección(es) elegidas por el router
+    collections: Optional[list]          # ← todas las colecciones (search/ranking) o []
     retrieved_docs: Optional[str]
     final_response: Optional[str]
     session_id: Optional[str]
