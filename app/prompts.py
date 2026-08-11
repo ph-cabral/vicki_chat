@@ -27,6 +27,13 @@ APOYÁNDOTE en los CVs que se te entregan en el contexto:
   MISMA búsqueda: no le des una respuesta que contradiga la anterior sin
   explicar qué cambió.
 
+# Procedimientos e instructivos
+También respondés consultas sobre PROCEDIMIENTOS e INSTRUCTIVOS internos de
+Everwear (cómo se hace una tarea, pasos de trabajo, normas por puesto). Cuando
+te entreguen documentos en el contexto, respondé SOLO con lo que dicen esos
+documentos, citando el título del documento en que te basás. Si no hay ningún
+documento relevante, decilo y sugerí cargarlo en /rrhh/puestos.
+
 # Estilo
 - Español rioplatense, conciso, sin relleno.
 - No armes tablas ni rankings salvo que te los pidan.
@@ -47,14 +54,18 @@ Contexto reciente de la conversación (para interpretar referencias como
 {history}
 
 Clasificá el ÚLTIMO mensaje del usuario y devolvé SOLO un JSON válido, sin texto extra:
-{{"intent": "<search|ranking|camera|general>", "query": "..."}}
+{{"intent": "<search|ranking|procedimiento|camera|general>", "query": "..."}}
 
 Reglas:
 - "search": pide/busca candidatos o perfiles para un puesto.
 - "ranking": pide ordenar o ponderar candidatos.
+- "procedimiento": pregunta por un procedimiento, instructivo, norma o "cómo se
+  hace/qué pasos tiene" una tarea/situación interna de la empresa (ej. "¿cuál es
+  el procedimiento ante un accidente?", "instructivo de picking", "¿cómo se
+  carga una nota de crédito?", "qué procedimientos tiene el puesto X").
 - "camera": pide una foto/snapshot de una cámara o reloj.
-- "general": saludo, charla, dudas o cualquier cosa que NO sea búsqueda de perfiles.
-- "query": SOLO para search/ranking. Reformulá el pedido como una búsqueda
+- "general": saludo, charla, dudas o cualquier cosa que NO sea búsqueda de perfiles ni procedimientos.
+- "query": para search/ranking/procedimiento. Reformulá el pedido como una búsqueda
   AUTOCONTENIDA (standalone), incorporando el puesto/skills/zona que ya se
   hablaron en la conversación si el último mensaje es una referencia o un
   pedido de seguimiento (ej. "dame los nombres de esos dos perfiles" →
@@ -63,6 +74,27 @@ Reglas:
   autocontenido, repetilo tal cual. Para camera/general devolvé "".
 
 Último mensaje: {message}
+"""
+
+# Contexto de respuesta para intent=procedimiento. {docs} = chunks recuperados de
+# la colección de procedimientos; {message} = consulta del usuario.
+PROC_RESPONSE_PROMPT = """## Procedimientos e instructivos encontrados:
+{docs}
+
+## Consulta del usuario:
+{message}
+
+# Reglas (CRÍTICO)
+- Respondé ÚNICAMENTE con lo que dicen los documentos de arriba. No inventes
+  pasos, responsables ni normas que no estén escritas.
+- Citá el documento en que te basás (título y si es procedimiento o instructivo).
+- Si hay varios documentos relevantes, organizá la respuesta por documento.
+- Si los documentos solo cubren parte de la consulta, respondé esa parte y
+  aclará qué falta.
+- Si no hay ningún documento relevante, decilo sin vueltas y sugerí cargarlo o
+  pedirlo al responsable del área (se cargan en /rrhh/puestos).
+- Pasos de trabajo → listalos en orden, completos, sin resumir de más: el que
+  pregunta los va a ejecutar tal cual.
 """
 
 # {names} = candidatos realmente presentes en los CVs recuperados (nombres exactos).

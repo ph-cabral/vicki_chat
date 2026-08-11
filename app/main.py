@@ -539,6 +539,43 @@ async def chat(request: ChatRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class RagDocumento(BaseModel):
+    id: int
+    tipo: str = "procedimiento"  # procedimiento | instructivo
+    titulo: str
+    contenido: str
+    version: int = 1
+    puestos: list[str] = []
+    vigente: bool = True
+
+
+@app.post("/rag/documento")
+async def rag_upsert_documento(doc: RagDocumento):
+    """Upsert de un procedimiento/instructivo en Qdrant (lo llama ever al
+    guardar/editar en /rrhh/puestos). Si vigente=False, borra los chunks."""
+    from app.rag_ingest import upsert_documento
+
+    try:
+        # embeddings + qdrant son bloqueantes → thread
+        chunks = await asyncio.to_thread(upsert_documento, doc.model_dump())
+        return {"ok": True, "doc_id": doc.id, "chunks": chunks}
+    except Exception as e:
+        logger.exception(f"rag ingest falló (doc {doc.id})")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/rag/documento/{doc_id}")
+async def rag_delete_documento(doc_id: int):
+    from app.rag_ingest import delete_documento
+
+    try:
+        await asyncio.to_thread(delete_documento, doc_id)
+        return {"ok": True, "doc_id": doc_id}
+    except Exception as e:
+        logger.exception(f"rag delete falló (doc {doc_id})")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/health")
 async def health():
     db_ok = False

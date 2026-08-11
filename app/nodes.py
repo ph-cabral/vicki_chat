@@ -16,7 +16,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from app.config import config
 from app.graph_state import AgentState
-from app.prompts import GROUNDING_RULES, ROUTER_PROMPT, SYSTEM_PROMPT
+from app.prompts import GROUNDING_RULES, PROC_RESPONSE_PROMPT, ROUTER_PROMPT, SYSTEM_PROMPT
 from app.tool import take_camera_snapshot
 from app.tools import list_collections, search_collections
 
@@ -103,7 +103,7 @@ router_llm = LLMWithFallback(
     ),
 )
 
-VALID_INTENTS = {"search", "ranking", "camera", "general"}
+VALID_INTENTS = {"search", "ranking", "procedimiento", "camera", "general"}
 
 
 def _safe_json(text: str) -> dict:
@@ -144,7 +144,14 @@ def router_node(state: AgentState) -> AgentState:
     # aparecían los mismos candidatos que ya estaban cargados. Con pocas
     # colecciones de CVs, buscar en todas (en paralelo, ver tools.py) es más
     # barato que el riesgo de una respuesta contradictoria.
-    collections = cols if intent in ("search", "ranking") else []
+    # Excepciones: la colección de procedimientos (PROC_COLLECTION) queda FUERA
+    # de las búsquedas de CVs, y el intent "procedimiento" busca SOLO ahí.
+    if intent == "procedimiento":
+        collections = [config.PROC_COLLECTION]
+    elif intent in ("search", "ranking"):
+        collections = [c for c in cols if c != config.PROC_COLLECTION]
+    else:
+        collections = []
 
     log.info(
         f"[ROUTER] intent={intent} cols={collections} "
@@ -185,6 +192,26 @@ def rag_search_node(state: AgentState) -> AgentState:
 
 def response_node(state: AgentState) -> AgentState:
     intent = state.get("intent", "search")
+
+    # Procedimientos/instructivos → prompt propio (sin reglas de CVs/candidatos).
+    if intent == "procedimiento":
+        docs = (state.get("retrieved_docs") or "").strip()
+        context_prompt = PROC_RESPONSE_PROMPT.format(
+            docs=docs if docs else "(no se encontró ningún procedimiento/instructivo relevante)",
+            message=state["user_message"],
+        )
+        messages = [
+            SystemMessage(content=SYSTEM_PROMPT),
+            *state["messages"][:-1],
+            HumanMessage(content=context_prompt),
+        ]
+        response = llm.invoke(messages)
+        return {
+            **state,
+            "messages": state["messages"] + [response],
+            "final_response": response.content,
+        }
+
     ranking_instruction = (
         "Ordená los candidatos por: experiencia relevante al puesto, especialización, "
         "seniority y estabilidad laboral, explicando brevemente cada valoración."

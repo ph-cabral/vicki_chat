@@ -59,6 +59,16 @@ def list_collections() -> list[str]:
 def _format_hit(col: str, p) -> str:
     payload = p.payload or {}
     meta = payload.get("metadata", {}) or {}
+    # Hit de procedimiento/instructivo (colección PROC_COLLECTION) → otro formato.
+    if meta.get("tipo_doc"):
+        puestos = meta.get("puestos") or []
+        return "\n".join([
+            f"\n=== {meta.get('titulo', 'Sin título')} "
+            f"[{meta.get('tipo_doc')} v{meta.get('version', 1)}, "
+            f"relevancia: {(p.score or 0.0):.2f}] ===",
+            f"Puestos: {', '.join(puestos) if puestos else 'todos'}",
+            payload.get("content", ""),
+        ])
     nombre = " ".join(x for x in [meta.get("nombre"), meta.get("apellido")] if x) or "N/A"
     email = meta.get("email", "N/A")
     content = payload.get("content", "")

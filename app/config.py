@@ -36,6 +36,8 @@ class Config:
     QDRANT_URL: str = os.getenv("QDRANT_URL", "http://n8n_qdrant:6333")
     QDRANT_API_KEY: str = os.getenv("QDRANT_API_KEY", "")
     QDRANT_COLLECTION: str = os.getenv("QDRANT_COLLECTION", "cvs")  # fallback si el router no elige
+    # Colección de procedimientos/instructivos por puesto (ingesta desde ever /rrhh/puestos).
+    PROC_COLLECTION: str = os.getenv("PROC_COLLECTION", "procedimientos")
     MODEL_NAME: str = os.getenv("MODEL_NAME", "gpt-4.1-mini")
     TOP_K: int = int(os.getenv("TOP_K", "8"))
     CONTEXT_WINDOW: int = int(os.getenv("CONTEXT_WINDOW", "30"))

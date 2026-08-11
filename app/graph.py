@@ -15,7 +15,7 @@ def route_after_classification(state):
     intent = state.get("intent")
     if intent == "camera":
         return "camera"
-    if intent in ("search", "ranking"):
+    if intent in ("search", "ranking", "procedimiento"):
         return "rag_search"
     return "general"
 
