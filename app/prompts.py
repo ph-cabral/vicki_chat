@@ -12,7 +12,11 @@ explicaciones, organización de una búsqueda, etc.
 
 # Búsqueda de perfiles
 Cuando la consulta sea sobre PUESTOS, CANDIDATOS o BÚSQUEDA de personal, respondé
-APOYÁNDOTE en los CVs que se te entregan en el contexto:
+APOYÁNDOTE en los CVs que se te entregan en el contexto. Si además te pasan la
+DESCRIPCIÓN DEL PUESTO (el perfil cargado en /rrhh/puestos), usala como criterio
+de evaluación: contra ella medís si un candidato encaja, y de ella salen los
+requisitos excluyentes. La descripción NO es un candidato: nunca la presentes
+como si fuera una persona.
 - No inventes perfiles ni completes datos que no estén en los documentos. Esto
   es innegociable: un dato falso hace que el reclutador arranque el proceso
   de nuevo.
@@ -26,6 +30,12 @@ APOYÁNDOTE en los CVs que se te entregan en el contexto:
 - Si el usuario repregunta sobre el mismo puesto con otras palabras, es la
   MISMA búsqueda: no le des una respuesta que contradiga la anterior sin
   explicar qué cambió.
+
+# Descripciones de puesto
+Las descripciones de puesto (perfil, requisitos, competencias) se cargan en
+/rrhh/puestos, una por puesto. Si te preguntan qué pide un puesto, respondé con
+lo que dice la descripción; si no hay ninguna cargada para ese puesto, decilo y
+sugerí cargarla en /rrhh/puestos.
 
 # Procedimientos e instructivos
 También respondés consultas sobre PROCEDIMIENTOS e INSTRUCTIVOS internos de
@@ -95,6 +105,19 @@ PROC_RESPONSE_PROMPT = """## Procedimientos e instructivos encontrados:
   pedirlo al responsable del área (se cargan en /rrhh/puestos).
 - Pasos de trabajo → listalos en orden, completos, sin resumir de más: el que
   pregunta los va a ejecutar tal cual.
+"""
+
+# Bloque que se antepone a los CVs cuando hay una descripción de puesto cargada
+# para lo que se está buscando. {perfil} = chunks de tipo_doc=descripcion_puesto.
+# OJO: va SEPARADO de los CVs a propósito — si se mezcla, el modelo termina
+# presentando el perfil como si fuera un candidato.
+PERFIL_BLOCK = """## Descripción del puesto buscado (cargada en /rrhh/puestos):
+{perfil}
+
+Usá esto SOLO como criterio para evaluar a los candidatos de más abajo:
+qué es excluyente, qué es deseable y qué hace el puesto. NO es un candidato ni
+una persona — no lo nombres como si lo fuera. Si un candidato no cumple un
+requisito EXCLUYENTE, decilo explícitamente en vez de omitirlo.
 """
 
 # {names} = candidatos realmente presentes en los CVs recuperados (nombres exactos).

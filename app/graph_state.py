@@ -14,5 +14,6 @@ class AgentState(TypedDict):
     search_query: Optional[str]          # ← query reformulada (autocontenida) por el router
     collections: Optional[list]          # ← todas las colecciones (search/ranking) o []
     retrieved_docs: Optional[str]
+    perfil_docs: Optional[str]           # ← descripción del puesto buscado (intent search/ranking)
     final_response: Optional[str]
     session_id: Optional[str]

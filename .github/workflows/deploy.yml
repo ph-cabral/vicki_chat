@@ -1,12 +1,24 @@
 name: Deploy
+# Corre en el runner self-hosted instalado en el server 10.10.0.159.
+# El runner NO hace checkout: entra al clon de produccion (~/projects/vicki_chat)
+# y ejecuta deploy.sh, que hace fetch + reset --hard + docker compose up --build.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "**.md"
+  workflow_dispatch:   # boton "Run workflow" en la pestania Actions
+
+concurrency:
+  group: deploy-vicki_chat
+  cancel-in-progress: false   # no cortar un build a la mitad
+
 jobs:
   deploy:
     runs-on: self-hosted
+    timeout-minutes: 30
     steps:
-      - run: |
+      - name: pull + build en el server
+        run: |
           cd ~/projects/vicki_chat
-          git pull
-          docker compose up -d --build
+          bash deploy.sh

@@ -36,7 +36,9 @@ class Config:
     QDRANT_URL: str = os.getenv("QDRANT_URL", "http://n8n_qdrant:6333")
     QDRANT_API_KEY: str = os.getenv("QDRANT_API_KEY", "")
     QDRANT_COLLECTION: str = os.getenv("QDRANT_COLLECTION", "cvs")  # fallback si el router no elige
-    # Colección de procedimientos/instructivos por puesto (ingesta desde ever /rrhh/puestos).
+    # Colección de documentos por puesto (ingesta desde ever /rrhh/puestos):
+    # procedimientos, instructivos Y descripciones de puesto. Se separan por
+    # metadata.tipo_doc — ver tools.py::_filtro_tipo_doc.
     PROC_COLLECTION: str = os.getenv("PROC_COLLECTION", "procedimientos")
     MODEL_NAME: str = os.getenv("MODEL_NAME", "gpt-4.1-mini")
     TOP_K: int = int(os.getenv("TOP_K", "8"))
@@ -51,6 +53,9 @@ class Config:
     QDRANT_TIMEOUT: float = float(os.getenv("QDRANT_TIMEOUT", "10"))
     QDRANT_CACHE_TTL: int = int(os.getenv("QDRANT_CACHE_TTL", "60"))  # cache de lista de colecciones
     ROUTER_MAX_TOKENS: int = int(os.getenv("ROUTER_MAX_TOKENS", "200"))
+    # Cuántos chunks de descripción de puesto se inyectan al buscar candidatos.
+    # Chico a propósito: es contexto de apoyo, no puede desplazar a los CVs.
+    PERFIL_TOP_K: int = int(os.getenv("PERFIL_TOP_K", "4"))
 
 
 config = Config()

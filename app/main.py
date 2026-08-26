@@ -541,7 +541,10 @@ async def chat(request: ChatRequest):
 
 class RagDocumento(BaseModel):
     id: int
-    tipo: str = "procedimiento"  # procedimiento | instructivo
+    # procedimiento | instructivo | descripcion_puesto
+    # (el tipo lo valida ever en lib/rrhh/documentosTipos.ts; acá se guarda como
+    # metadata.tipo_doc y define en qué búsqueda aparece — ver tools.py)
+    tipo: str = "procedimiento"
     titulo: str
     contenido: str
     version: int = 1
@@ -551,8 +554,9 @@ class RagDocumento(BaseModel):
 
 @app.post("/rag/documento")
 async def rag_upsert_documento(doc: RagDocumento):
-    """Upsert de un procedimiento/instructivo en Qdrant (lo llama ever al
-    guardar/editar en /rrhh/puestos). Si vigente=False, borra los chunks."""
+    """Upsert de un documento de puesto en Qdrant — procedimiento, instructivo o
+    descripción de puesto (lo llama ever al guardar/editar en /rrhh/puestos).
+    Si vigente=False, borra los chunks."""
     from app.rag_ingest import upsert_documento
 
     try:

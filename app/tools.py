@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from langchain_openai import OpenAIEmbeddings
 from qdrant_client import QdrantClient
+from qdrant_client import models as qm
 
 from app.config import config
 
@@ -56,15 +57,33 @@ def list_collections() -> list[str]:
     return _cols_cache["names"]
 
 
+# Tipos de documento que llegan desde ever /rrhh/puestos (ver
+# lib/rrhh/documentosTipos.ts). `descripcion_puesto` es el perfil del puesto y
+# se busca APARTE de los procedimientos — ver nodes.py::rag_search_node.
+TIPO_DESCRIPCION_PUESTO = "descripcion_puesto"
+TIPO_DOC_LABEL = {
+    "procedimiento": "procedimiento",
+    "instructivo": "instructivo",
+    TIPO_DESCRIPCION_PUESTO: "descripción de puesto",
+}
+
+
+def _filtro_tipo_doc(tipos: list[str], excluir: bool = False) -> qm.Filter:
+    """Filtro de payload por metadata.tipo_doc (match any / match none)."""
+    cond = qm.FieldCondition(key="metadata.tipo_doc", match=qm.MatchAny(any=tipos))
+    return qm.Filter(must_not=[cond]) if excluir else qm.Filter(must=[cond])
+
+
 def _format_hit(col: str, p) -> str:
     payload = p.payload or {}
     meta = payload.get("metadata", {}) or {}
     # Hit de procedimiento/instructivo (colección PROC_COLLECTION) → otro formato.
     if meta.get("tipo_doc"):
         puestos = meta.get("puestos") or []
+        etiqueta = TIPO_DOC_LABEL.get(meta.get("tipo_doc"), meta.get("tipo_doc"))
         return "\n".join([
             f"\n=== {meta.get('titulo', 'Sin título')} "
-            f"[{meta.get('tipo_doc')} v{meta.get('version', 1)}, "
+            f"[{etiqueta} v{meta.get('version', 1)}, "
             f"relevancia: {(p.score or 0.0):.2f}] ===",
             f"Puestos: {', '.join(puestos) if puestos else 'todos'}",
             payload.get("content", ""),
@@ -89,9 +108,21 @@ def _format_hit(col: str, p) -> str:
     return "\n".join(blk)
 
 
-def search_collections(query: str, collections: list[str], k: int | None = None) -> str:
+def search_collections(
+    query: str,
+    collections: list[str],
+    k: int | None = None,
+    flt: qm.Filter | None = None,
+    vector: list[float] | None = None,
+) -> str:
     """Embebe el query una vez y busca en 1 o varias colecciones en paralelo.
-    Devuelve contexto formateado, ordenado por score global."""
+    Devuelve contexto formateado, ordenado por score global.
+
+    flt:    filtro de payload de Qdrant (ej. solo descripciones de puesto).
+    vector: embedding ya calculado del query — para no pagar dos veces el
+            embed cuando se hacen dos búsquedas con el MISMO query
+            (CVs + descripción de puesto, ver nodes.py::rag_search_node).
+    """
     k = k or config.TOP_K
     cols = [c for c in (collections or []) if c]
     if not cols:
@@ -103,12 +134,15 @@ def search_collections(query: str, collections: list[str], k: int | None = None)
         else:
             return ""
 
-    vector = get_embeddings().embed_query(query)
+    if vector is None:
+        vector = get_embeddings().embed_query(query)
     client = get_client()
 
     def _one(col: str):
         try:
-            pts = client.query_points(col, query=vector, limit=k, with_payload=True).points
+            pts = client.query_points(
+                col, query=vector, limit=k, with_payload=True, query_filter=flt
+            ).points
             return [(col, p) for p in pts]
         except Exception:
             log.exception(f"búsqueda falló en {col!r} (¿otra dimensión de embedding?)")
@@ -125,3 +159,37 @@ def search_collections(query: str, collections: list[str], k: int | None = None)
     hits.sort(key=lambda cp: cp[1].score or 0.0, reverse=True)
     top = hits[: k if len(cols) == 1 else k * 2]
     return "\n".join(_format_hit(c, p) for c, p in top)
+
+
+def embed_query(query: str) -> list[float]:
+    """Embedding del query, para reusarlo entre varias búsquedas."""
+    return get_embeddings().embed_query(query)
+
+
+def search_descripcion_puesto(query: str, k: int | None = None, vector=None) -> str:
+    """Busca SOLO descripciones de puesto (dentro de PROC_COLLECTION).
+
+    Existe porque router_node excluye PROC_COLLECTION de las búsquedas de CVs
+    (para que los procedimientos no ensucien los candidatos), pero el perfil del
+    puesto SÍ tiene que llegar cuando se busca gente. Se trae aparte y filtrado.
+    """
+    return search_collections(
+        query,
+        [config.PROC_COLLECTION],
+        k=k or config.PERFIL_TOP_K,
+        flt=_filtro_tipo_doc([TIPO_DESCRIPCION_PUESTO]),
+        vector=vector,
+    )
+
+
+def search_procedimientos(query: str, k: int | None = None, vector=None) -> str:
+    """intent=procedimiento: procedimientos e instructivos, SIN descripciones de
+    puesto (si no, "¿qué procedimiento sigue X?" devuelve el perfil del puesto,
+    que no tiene pasos)."""
+    return search_collections(
+        query,
+        [config.PROC_COLLECTION],
+        k=k,
+        flt=_filtro_tipo_doc([TIPO_DESCRIPCION_PUESTO], excluir=True),
+        vector=vector,
+    )

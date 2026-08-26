@@ -16,9 +16,21 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from app.config import config
 from app.graph_state import AgentState
-from app.prompts import GROUNDING_RULES, PROC_RESPONSE_PROMPT, ROUTER_PROMPT, SYSTEM_PROMPT
+from app.prompts import (
+    GROUNDING_RULES,
+    PERFIL_BLOCK,
+    PROC_RESPONSE_PROMPT,
+    ROUTER_PROMPT,
+    SYSTEM_PROMPT,
+)
 from app.tool import take_camera_snapshot
-from app.tools import list_collections, search_collections
+from app.tools import (
+    embed_query,
+    list_collections,
+    search_collections,
+    search_descripcion_puesto,
+    search_procedimientos,
+)
 
 log = logging.getLogger("nodes")
 
@@ -146,6 +158,12 @@ def router_node(state: AgentState) -> AgentState:
     # barato que el riesgo de una respuesta contradictoria.
     # Excepciones: la colección de procedimientos (PROC_COLLECTION) queda FUERA
     # de las búsquedas de CVs, y el intent "procedimiento" busca SOLO ahí.
+    #
+    # OJO (2026-08-25): esa exclusión dejaba invisible la DESCRIPCIÓN DE PUESTO,
+    # que vive en PROC_COLLECTION pero es justamente lo que hay que leer cuando
+    # se busca gente. No se arregla metiendo PROC_COLLECTION acá (volverían los
+    # procedimientos a ensuciar los CVs): se trae aparte y filtrada por
+    # metadata.tipo_doc en rag_search_node → state["perfil_docs"].
     if intent == "procedimiento":
         collections = [config.PROC_COLLECTION]
     elif intent in ("search", "ranking"):
@@ -181,13 +199,46 @@ def rag_search_node(state: AgentState) -> AgentState:
     # search_query es la versión reformulada por el router (autocontenida);
     # si no vino, cae al mensaje crudo del usuario.
     query = state.get("search_query") or state["user_message"]
+    intent = state.get("intent")
+
+    # El embedding del query se calcula UNA vez y se reusa en las dos búsquedas
+    # (CVs + descripción de puesto). Si falla, search_collections lo recalcula.
+    vector = None
     try:
-        docs = search_collections(query, state.get("collections") or [])
+        vector = embed_query(query)
+    except Exception:
+        log.exception("embed_query falló; cada búsqueda embebe por su cuenta")
+
+    # ── procedimientos/instructivos: sin descripciones de puesto ──
+    if intent == "procedimiento":
+        try:
+            docs = search_procedimientos(query, vector=vector)
+        except Exception:
+            log.exception("rag_search (procedimiento) falló")
+            docs = ""
+        log.info(f"[RAG] proc query={query[:120]!r} {len(str(docs))} chars")
+        return {**state, "retrieved_docs": docs, "perfil_docs": ""}
+
+    # ── búsqueda de candidatos: CVs + perfil del puesto (dos consultas) ──
+    try:
+        docs = search_collections(query, state.get("collections") or [], vector=vector)
     except Exception:
         log.exception("rag_search falló")
         docs = ""
-    log.info(f"[RAG] query={query[:120]!r} cols={state.get('collections')} {len(str(docs))} chars")
-    return {**state, "retrieved_docs": docs}
+
+    perfil = ""
+    if intent in ("search", "ranking"):
+        try:
+            perfil = search_descripcion_puesto(query, vector=vector)
+        except Exception:
+            # que no se caiga la búsqueda de candidatos por esto
+            log.exception("búsqueda de descripción de puesto falló")
+
+    log.info(
+        f"[RAG] query={query[:120]!r} cols={state.get('collections')} "
+        f"{len(str(docs))} chars cvs + {len(str(perfil))} chars perfil"
+    )
+    return {**state, "retrieved_docs": docs, "perfil_docs": perfil}
 
 
 def response_node(state: AgentState) -> AgentState:
@@ -220,10 +271,15 @@ def response_node(state: AgentState) -> AgentState:
     docs = (state.get("retrieved_docs") or "").strip()
     cols = ", ".join(state.get("collections") or []) or "sin colección"
     names = _extract_names(docs)
+    # Perfil del puesto (si hay uno cargado en /rrhh/puestos para lo buscado).
+    # Va ANTES de los CVs y fuera de GROUNDING_RULES: es criterio, no candidato.
+    perfil = (state.get("perfil_docs") or "").strip()
+    perfil_block = PERFIL_BLOCK.format(perfil=perfil) + "\n" if perfil else ""
     grounding = GROUNDING_RULES.format(
         names=", ".join(names) if names else "(ninguno — no hay CVs en el contexto)"
     )
     context_prompt = (
+        f"{perfil_block}"
         f"## CVs encontrados ({cols}):\n"
         f"{docs if docs else '(no se encontraron CVs relevantes)'}\n\n"
         f"## Consulta del usuario:\n{state['user_message']}\n\n"
