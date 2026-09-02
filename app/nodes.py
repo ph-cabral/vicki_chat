@@ -23,6 +23,7 @@ from app.prompts import (
     PROC_CONTEXT_BLOCK,
     PROC_RESPONSE_PROMPT,
     ROUTER_PROMPT,
+    SHORTLIST_RULES,
     SYSTEM_PROMPT,
 )
 from app.tool import take_camera_snapshot
@@ -325,19 +326,25 @@ def response_node(state: AgentState) -> AgentState:
     grounding = GROUNDING_RULES.format(
         names=", ".join(names) if names else "(ninguno — no hay CVs en el contexto)"
     )
+    # La shortlist ya viene armada y ordenada desde search_cvs (los N más
+    # cercanos, sin piso de score). Acá solo se le dice al modelo que la
+    # presente entera y en orden: el filtro "¿califica o no?" era justamente lo
+    # que hacía que una búsqueda sin match perfecto terminara en "no tengo nada".
+    n_cands = len(state.get("candidatos") or []) or len(names)
+    shortlist_block = SHORTLIST_RULES.format(n=n_cands) if n_cands else ""
     context_prompt = (
         f"{perfil_block}"
         f"{proc_block}"
-        f"## CVs encontrados ({cols}):\n"
-        f"{docs if docs else '(no se encontraron CVs relevantes)'}\n\n"
+        f"## Shortlist: los {n_cands} candidatos más cercanos ({cols}), "
+        f"ordenados de mayor a menor:\n"
+        f"{docs if docs else '(no hay ningún CV cargado que se acerque)'}\n\n"
         f"## Consulta del usuario:\n{state['user_message']}\n\n"
+        f"{shortlist_block}\n"
         f"{grounding}\n"
         f"Respondé apoyándote en los CVs de arriba. No inventes datos. "
-        f"Si hay candidatos en la lista aunque matcheen solo parcialmente, "
-        f"mostralos igual aclarando qué les falta — no cierres con un 'no "
-        f"tengo nada' habiendo candidatos en: {', '.join(names) if names else '(ninguno)'}. "
-        f"Si de verdad no hay ningún CV relevante, decilo y ofrecé ampliar la "
-        f"búsqueda (otra zona, rubro afín, menos experiencia).\n{ranking_instruction}"
+        f"Si de verdad no hay ningún CV en la shortlist, decilo y ofrecé ampliar "
+        f"la búsqueda (otra zona, rubro afín, menos experiencia)."
+        f"\n{ranking_instruction}"
     )
     messages = [
         SystemMessage(content=SYSTEM_PROMPT),

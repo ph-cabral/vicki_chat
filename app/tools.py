@@ -218,14 +218,32 @@ def _candidato_de_hit(col: str, p) -> dict | None:
 
 def search_cvs(query: str, collections: list[str], k: int | None = None,
                vector: list[float] | None = None,
-               descartados: list[int] | None = None) -> tuple[str, list[dict]]:
+               descartados: list[int] | None = None,
+               top_n: int | None = None) -> tuple[str, list[dict]]:
     """Búsqueda de CVs: devuelve (contexto formateado, candidatos).
 
     Los candidatos salen de los MISMOS hits que arma el contexto — no hay una
     segunda consulta a Qdrant ni una vuelta más al embedding. Vienen ordenados
     por relevancia y deduplicados: un CV largo entra con varios chunks y sin
-    dedup la barra mostraría a la misma persona tres veces."""
-    k = k or config.TOP_K
+    dedup la barra mostraría a la misma persona tres veces.
+
+    SHORTLIST FIJA: se devuelven siempre las `top_n` (default
+    config.CANDIDATOS_TOP_N) PERSONAS más cercanas, de mayor a menor. Antes se
+    pedían TOP_K chunks y recién después se deduplicaba, así que la cantidad de
+    personas dependía de cuán largos fueran los CVs: 8 chunks podían ser 2
+    personas y la respuesta terminaba en "no tengo candidatos". Ahora se
+    sobre-pide (top_n * chunks_por_candidato, una sola consulta a Qdrant, mismo
+    vector) y se recorta a top_n personas con hasta CV_CHUNKS_POR_CANDIDATO
+    chunks cada una.
+
+    Sin piso de score a propósito: la shortlist es "lo más parecido que hay",
+    no "lo que matchea". El encaje parcial lo explica el modelo, no se filtra
+    acá — ver prompts.py::SHORTLIST_RULES.
+    """
+    top_n = top_n or config.CANDIDATOS_TOP_N
+    por_cand = max(1, config.CV_CHUNKS_POR_CANDIDATO)
+    # k cuenta CHUNKS: hay que pedir de más para que salgan top_n PERSONAS.
+    k = max(k or config.TOP_K, top_n * por_cand)
     cols = [c for c in (collections or []) if c]
     if not cols:
         # mismo repliegue que search_collections: si el router se quedó sin
@@ -239,23 +257,40 @@ def search_cvs(query: str, collections: list[str], k: int | None = None,
         else:
             return "", []
     hits = _buscar_hits(query, cols, k, _filtro_descartes(descartados), vector, None)
-    texto = "\n".join(_format_hit(c, p) for c, p in hits)
 
+    # Agrupado por persona, respetando el orden por score de `hits`: el primer
+    # chunk de alguien define su posición en la shortlist.
     candidatos: list[dict] = []
     vistos: dict = {}
+    chunks: dict = {}  # clave → [(col, point)] (los mejores de esa persona)
     for col, p in hits:
         c = _candidato_de_hit(col, p)
         if not c:
             continue
         clave = c["candidato_id"] or c["hash_archivo"] or c["nombre_completo"].lower()
         if clave in vistos:
-            # mismo candidato en otro chunk: queda el mejor score
+            # mismo candidato en otro chunk: queda el mejor score y, si todavía
+            # hay cupo, el chunk suma contexto (otra parte del mismo CV)
             if c["score"] > vistos[clave]["score"]:
                 vistos[clave]["score"] = c["score"]
+            if len(chunks[clave]) < por_cand:
+                chunks[clave].append((col, p))
             continue
+        if len(candidatos) >= top_n:
+            continue  # ya hay shortlist completa; el resto no entra al prompt
         vistos[clave] = c
+        chunks[clave] = [(col, p)]
+        c["posicion"] = len(candidatos) + 1
         candidatos.append(c)
-    return texto, candidatos
+
+    # El contexto va ordenado por candidato (no chunk por chunk intercalado):
+    # el modelo tiene que poder leer a cada persona entera y de mayor a menor.
+    partes: list[str] = []
+    for c in candidatos:
+        clave = c["candidato_id"] or c["hash_archivo"] or c["nombre_completo"].lower()
+        partes.append(f"\n### Candidato #{c['posicion']} — {c['nombre_completo']}")
+        partes.extend(_format_hit(col, p) for col, p in chunks[clave])
+    return "\n".join(partes), candidatos
 
 
 def ensure_indices_cv() -> None:

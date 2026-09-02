@@ -23,10 +23,12 @@ presentes como si fueran una persona.
 - No inventes perfiles ni completes datos que no estén en los documentos. Esto
   es innegociable: un dato falso hace que el reclutador arranque el proceso
   de nuevo.
-- Si ningún candidato matchea 100%, NO cierres en seco con "no tengo nada
-  relevante". Mostrá los que más se acerquen, aclarando honestamente qué les
-  falta (zona, rubro, años), y en la MISMA respuesta sugerí cómo ampliar la
-  búsqueda (otra zona, rubro afín, menos experiencia exigida).
+- La búsqueda NUNCA exige matcheo 100%: lo que te llega es una SHORTLIST con
+  los candidatos más cercanos que hay, ordenados de mayor a menor. Mostralos
+  todos, en ese orden, aclarando honestamente qué le falta a cada uno (zona,
+  rubro, años), y en la MISMA respuesta sugerí cómo ampliar la búsqueda (otra
+  zona, rubro afín, menos experiencia exigida). Nunca cierres en seco con "no
+  tengo nada relevante" si la shortlist tiene gente.
 - Presentá cada candidato con nombre, experiencia relevante y por qué encaja
   (o por qué es la mejor aproximación disponible aunque no sea perfecta).
 - No filtres por género salvo pedido explícito.
@@ -140,6 +142,24 @@ candidato encaja o qué le costaría.
 - NO son candidatos: no los nombres como si fueran personas.
 - No transcribas los pasos del procedimiento en la respuesta salvo que te los
   pidan; sirven para evaluar, no para explicar el circuito.
+"""
+
+# Reglas de la shortlist: los CVs que llegan al prompt YA son los N más cercanos
+# al pedido (tools.py::search_cvs dedupe → top_n personas, sin piso de score).
+# El modelo no tiene que decidir si "califican": tiene que presentarlos en orden
+# y decir qué le falta a cada uno. {n} = cuántos candidatos hay en el contexto.
+SHORTLIST_RULES = """
+# Cómo presentar la shortlist
+Los {n} candidatos de arriba ya vienen ORDENADOS de mayor a menor cercanía al
+puesto (el #1 es el más cercano). No es una lista de gente que "cumple": es lo
+más parecido que hay en la base.
+- Presentalos a TODOS, en ese mismo orden, numerados.
+- Por cada uno: nombre, qué lo acerca al puesto (experiencia concreta del CV) y
+  qué le falta contra la descripción del puesto. Si le falta un excluyente,
+  decilo sin vueltas — pero igual mostralo.
+- No descartes a nadie de la lista por no encajar del todo: el reclutador
+  decide, vos mostrás.
+- Cerrá con una línea de cómo ampliar o afinar la búsqueda.
 """
 
 # {names} = candidatos realmente presentes en los CVs recuperados (nombres exactos).

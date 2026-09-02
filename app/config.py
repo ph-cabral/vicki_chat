@@ -56,6 +56,16 @@ class Config:
     # Cuántos chunks de descripción de puesto se inyectan al buscar candidatos.
     # Chico a propósito: es contexto de apoyo, no puede desplazar a los CVs.
     PERFIL_TOP_K: int = int(os.getenv("PERFIL_TOP_K", "4"))
+    # ── Shortlist de candidatos ───────────────────────────────────────────────
+    # Cuántas PERSONAS distintas se devuelven siempre, ordenadas de mayor a
+    # menor cercanía al puesto. TOP_K cuenta CHUNKS, no personas: un CV largo
+    # entra con varios chunks y se comía el cupo, así que con TOP_K=8 podían
+    # salir 2 personas (o ninguna nueva si las mejores compartían CV). Se
+    # sobre-pide chunks y se deduplica a CANDIDATOS_TOP_N personas.
+    CANDIDATOS_TOP_N: int = int(os.getenv("CANDIDATOS_TOP_N", "5"))
+    # Chunks por persona que entran al contexto (los mejores). Acota el prompt:
+    # sin tope, un CV de 12 chunks desplaza a los otros 4 candidatos.
+    CV_CHUNKS_POR_CANDIDATO: int = int(os.getenv("CV_CHUNKS_POR_CANDIDATO", "3"))
     # ── Procedimientos/instructivos como contexto al BUSCAR CANDIDATOS ────────
     # Además del perfil (qué se pide), se inyecta qué HACE el puesto. Va con
     # piso de score porque la query es de candidatos, no de procedimientos: sin
