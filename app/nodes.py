@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 from langchain_anthropic import ChatAnthropic
 from langchain_openai import ChatOpenAI
@@ -19,6 +20,7 @@ from app.graph_state import AgentState
 from app.prompts import (
     GROUNDING_RULES,
     PERFIL_BLOCK,
+    PROC_CONTEXT_BLOCK,
     PROC_RESPONSE_PROMPT,
     ROUTER_PROMPT,
     SYSTEM_PROMPT,
@@ -201,8 +203,9 @@ def rag_search_node(state: AgentState) -> AgentState:
     query = state.get("search_query") or state["user_message"]
     intent = state.get("intent")
 
-    # El embedding del query se calcula UNA vez y se reusa en las dos búsquedas
-    # (CVs + descripción de puesto). Si falla, search_collections lo recalcula.
+    # El embedding del query se calcula UNA vez y se reusa en las tres búsquedas
+    # (CVs + descripción de puesto + procedimientos). Si falla, search_collections
+    # lo recalcula por su cuenta.
     vector = None
     try:
         vector = embed_query(query)
@@ -217,28 +220,47 @@ def rag_search_node(state: AgentState) -> AgentState:
             log.exception("rag_search (procedimiento) falló")
             docs = ""
         log.info(f"[RAG] proc query={query[:120]!r} {len(str(docs))} chars")
-        return {**state, "retrieved_docs": docs, "perfil_docs": ""}
+        return {**state, "retrieved_docs": docs, "perfil_docs": "", "proc_docs": ""}
 
-    # ── búsqueda de candidatos: CVs + perfil del puesto (dos consultas) ──
-    try:
-        docs = search_collections(query, state.get("collections") or [], vector=vector)
-    except Exception:
-        log.exception("rag_search falló")
-        docs = ""
-
-    perfil = ""
+    # ── búsqueda de candidatos ────────────────────────────────────────────
+    # Tres consultas a Qdrant que comparten el MISMO embedding:
+    #   cvs    → las personas
+    #   perfil → descripción del puesto: qué se PIDE (criterio excluyente)
+    #   proc   → procedimientos/instructivos: qué se HACE en el puesto
+    # Van EN PARALELO porque son independientes; en serie la latencia se sumaba
+    # una atrás de otra y esto corre en cada mensaje de búsqueda.
+    tareas = {
+        "cvs": lambda: search_collections(
+            query, state.get("collections") or [], vector=vector
+        ),
+    }
     if intent in ("search", "ranking"):
-        try:
-            perfil = search_descripcion_puesto(query, vector=vector)
-        except Exception:
-            # que no se caiga la búsqueda de candidatos por esto
-            log.exception("búsqueda de descripción de puesto falló")
+        tareas["perfil"] = lambda: search_descripcion_puesto(query, vector=vector)
+        if config.PROC_CONTEXT_EN_BUSQUEDA:
+            tareas["proc"] = lambda: search_procedimientos(
+                query,
+                k=config.PROC_CONTEXT_TOP_K,
+                vector=vector,
+                min_score=config.PROC_CONTEXT_MIN_SCORE,
+            )
 
+    res: dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=len(tareas)) as ex:
+        futuros = {nombre: ex.submit(fn) for nombre, fn in tareas.items()}
+        for nombre, fut in futuros.items():
+            try:
+                res[nombre] = fut.result() or ""
+            except Exception:
+                # el contexto de apoyo nunca puede voltear la búsqueda de CVs
+                log.exception(f"búsqueda {nombre!r} falló")
+                res[nombre] = ""
+
+    docs, perfil, proc = res.get("cvs", ""), res.get("perfil", ""), res.get("proc", "")
     log.info(
         f"[RAG] query={query[:120]!r} cols={state.get('collections')} "
-        f"{len(str(docs))} chars cvs + {len(str(perfil))} chars perfil"
+        f"{len(docs)} chars cvs + {len(perfil)} chars perfil + {len(proc)} chars proc"
     )
-    return {**state, "retrieved_docs": docs, "perfil_docs": perfil}
+    return {**state, "retrieved_docs": docs, "perfil_docs": perfil, "proc_docs": proc}
 
 
 def response_node(state: AgentState) -> AgentState:
@@ -275,11 +297,16 @@ def response_node(state: AgentState) -> AgentState:
     # Va ANTES de los CVs y fuera de GROUNDING_RULES: es criterio, no candidato.
     perfil = (state.get("perfil_docs") or "").strip()
     perfil_block = PERFIL_BLOCK.format(perfil=perfil) + "\n" if perfil else ""
+    # Procedimientos/instructivos del puesto: qué HACE la persona ahí. Contexto
+    # para evaluar el encaje, no requisito ni candidato (ver PROC_CONTEXT_BLOCK).
+    proc_ctx = (state.get("proc_docs") or "").strip()
+    proc_block = PROC_CONTEXT_BLOCK.format(procedimientos=proc_ctx) + "\n" if proc_ctx else ""
     grounding = GROUNDING_RULES.format(
         names=", ".join(names) if names else "(ninguno — no hay CVs en el contexto)"
     )
     context_prompt = (
         f"{perfil_block}"
+        f"{proc_block}"
         f"## CVs encontrados ({cols}):\n"
         f"{docs if docs else '(no se encontraron CVs relevantes)'}\n\n"
         f"## Consulta del usuario:\n{state['user_message']}\n\n"

@@ -15,8 +15,11 @@ Cuando la consulta sea sobre PUESTOS, CANDIDATOS o BÚSQUEDA de personal, respon
 APOYÁNDOTE en los CVs que se te entregan en el contexto. Si además te pasan la
 DESCRIPCIÓN DEL PUESTO (el perfil cargado en /rrhh/puestos), usala como criterio
 de evaluación: contra ella medís si un candidato encaja, y de ella salen los
-requisitos excluyentes. La descripción NO es un candidato: nunca la presentes
-como si fuera una persona.
+requisitos excluyentes. Si también te pasan PROCEDIMIENTOS o INSTRUCTIVOS del
+puesto, son el trabajo real del día a día: te sirven para entender qué va a
+tener que hacer la persona y fundamentar el encaje, pero NO son requisitos
+excluyentes. Ni la descripción ni los procedimientos son candidatos: nunca los
+presentes como si fueran una persona.
 - No inventes perfiles ni completes datos que no estén en los documentos. Esto
   es innegociable: un dato falso hace que el reclutador arranque el proceso
   de nuevo.
@@ -118,6 +121,25 @@ Usá esto SOLO como criterio para evaluar a los candidatos de más abajo:
 qué es excluyente, qué es deseable y qué hace el puesto. NO es un candidato ni
 una persona — no lo nombres como si lo fuera. Si un candidato no cumple un
 requisito EXCLUYENTE, decilo explícitamente en vez de omitirlo.
+"""
+
+# Bloque con los procedimientos/instructivos del puesto, cuando se están
+# buscando CANDIDATOS (no cuando preguntan por el procedimiento en sí).
+# {procedimientos} = chunks de tipo_doc procedimiento|instructivo.
+# Va después del perfil y antes de los CVs: el perfil dice qué se PIDE, esto
+# dice qué se HACE, y recién después vienen las personas.
+PROC_CONTEXT_BLOCK = """## Cómo se trabaja en ese puesto (procedimientos e instructivos cargados en /rrhh/puestos):
+{procedimientos}
+
+Esto es lo que la persona va a tener que HACER todos los días. Usalo para
+entender el trabajo real: qué tareas, herramientas, sistemas, responsabilidades
+y contacto con otras áreas implica el puesto, y para justificar por qué un
+candidato encaja o qué le costaría.
+- NO son requisitos excluyentes: los excluyentes salen de la descripción del
+  puesto, no de acá.
+- NO son candidatos: no los nombres como si fueran personas.
+- No transcribas los pasos del procedimiento en la respuesta salvo que te los
+  pidan; sirven para evaluar, no para explicar el circuito.
 """
 
 # {names} = candidatos realmente presentes en los CVs recuperados (nombres exactos).

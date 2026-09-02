@@ -114,14 +114,19 @@ def search_collections(
     k: int | None = None,
     flt: qm.Filter | None = None,
     vector: list[float] | None = None,
+    score_threshold: float | None = None,
 ) -> str:
     """Embebe el query una vez y busca en 1 o varias colecciones en paralelo.
     Devuelve contexto formateado, ordenado por score global.
 
     flt:    filtro de payload de Qdrant (ej. solo descripciones de puesto).
     vector: embedding ya calculado del query — para no pagar dos veces el
-            embed cuando se hacen dos búsquedas con el MISMO query
-            (CVs + descripción de puesto, ver nodes.py::rag_search_node).
+            embed cuando se hacen varias búsquedas con el MISMO query
+            (CVs + descripción de puesto + procedimientos, ver
+            nodes.py::rag_search_node).
+    score_threshold: piso de similitud. Qdrant devuelve siempre los K mejores
+            aunque sean malos; cuando el resultado es contexto de apoyo (no la
+            respuesta), traer basura es peor que no traer nada.
     """
     k = k or config.TOP_K
     cols = [c for c in (collections or []) if c]
@@ -141,7 +146,8 @@ def search_collections(
     def _one(col: str):
         try:
             pts = client.query_points(
-                col, query=vector, limit=k, with_payload=True, query_filter=flt
+                col, query=vector, limit=k, with_payload=True, query_filter=flt,
+                score_threshold=score_threshold,
             ).points
             return [(col, p) for p in pts]
         except Exception:
@@ -182,14 +188,23 @@ def search_descripcion_puesto(query: str, k: int | None = None, vector=None) -> 
     )
 
 
-def search_procedimientos(query: str, k: int | None = None, vector=None) -> str:
-    """intent=procedimiento: procedimientos e instructivos, SIN descripciones de
-    puesto (si no, "¿qué procedimiento sigue X?" devuelve el perfil del puesto,
-    que no tiene pasos)."""
+def search_procedimientos(query: str, k: int | None = None, vector=None,
+                          min_score: float | None = None) -> str:
+    """Procedimientos e instructivos, SIN descripciones de puesto (si no,
+    "¿qué procedimiento sigue X?" devuelve el perfil del puesto, que no tiene
+    pasos).
+
+    Dos usos:
+    - intent=procedimiento → es LA respuesta: k normal, sin piso de score.
+    - intent=search/ranking → es contexto de qué hace el puesto, al lado del
+      perfil: k chico y min_score, porque ahí la query es de candidatos y sin
+      piso entran procedimientos de cualquier otro puesto.
+    """
     return search_collections(
         query,
         [config.PROC_COLLECTION],
         k=k,
         flt=_filtro_tipo_doc([TIPO_DESCRIPCION_PUESTO], excluir=True),
         vector=vector,
+        score_threshold=min_score,
     )

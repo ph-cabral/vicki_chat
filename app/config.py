@@ -56,6 +56,14 @@ class Config:
     # Cuántos chunks de descripción de puesto se inyectan al buscar candidatos.
     # Chico a propósito: es contexto de apoyo, no puede desplazar a los CVs.
     PERFIL_TOP_K: int = int(os.getenv("PERFIL_TOP_K", "4"))
+    # ── Procedimientos/instructivos como contexto al BUSCAR CANDIDATOS ────────
+    # Además del perfil (qué se pide), se inyecta qué HACE el puesto. Va con
+    # piso de score porque la query es de candidatos, no de procedimientos: sin
+    # el piso, Qdrant devuelve igual los K mejores aunque no tengan nada que ver
+    # y ensucian el contexto. TOP_K chico por lo mismo que PERFIL_TOP_K.
+    PROC_CONTEXT_TOP_K: int = int(os.getenv("PROC_CONTEXT_TOP_K", "3"))
+    PROC_CONTEXT_MIN_SCORE: float = float(os.getenv("PROC_CONTEXT_MIN_SCORE", "0.35"))
+    PROC_CONTEXT_EN_BUSQUEDA: bool = os.getenv("PROC_CONTEXT_EN_BUSQUEDA", "1").lower() not in ("0", "false", "no")
 
 
 config = Config()

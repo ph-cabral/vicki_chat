@@ -15,5 +15,6 @@ class AgentState(TypedDict):
     collections: Optional[list]          # ← todas las colecciones (search/ranking) o []
     retrieved_docs: Optional[str]
     perfil_docs: Optional[str]           # ← descripción del puesto buscado (intent search/ranking)
+    proc_docs: Optional[str]             # ← procedimientos/instructivos del puesto (intent search/ranking)
     final_response: Optional[str]
     session_id: Optional[str]
