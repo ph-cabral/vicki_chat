@@ -64,6 +64,11 @@ class Config:
     PROC_CONTEXT_TOP_K: int = int(os.getenv("PROC_CONTEXT_TOP_K", "3"))
     PROC_CONTEXT_MIN_SCORE: float = float(os.getenv("PROC_CONTEXT_MIN_SCORE", "0.35"))
     PROC_CONTEXT_EN_BUSQUEDA: bool = os.getenv("PROC_CONTEXT_EN_BUSQUEDA", "1").lower() not in ("0", "false", "no")
+    # ── Archivos de CV ────────────────────────────────────────────────────────
+    # Store que escribe vicki_mail (original + PDF + miniatura), montado acá de
+    # SOLO LECTURA. Layout: <hash[:2]>/<hash>/{original.ext,doc.pdf,thumb.jpg}
+    # — ver vicki_mail/app/cv_store.py.
+    CV_STORE_DIR: str = os.getenv("CV_STORE_DIR", "/data/cv_store")
 
 
 config = Config()

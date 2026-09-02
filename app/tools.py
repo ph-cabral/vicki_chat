@@ -139,6 +139,16 @@ def search_collections(
         else:
             return ""
 
+    top = _buscar_hits(query, cols, k, flt, vector, score_threshold)
+    return "\n".join(_format_hit(c, p) for c, p in top)
+
+
+def _buscar_hits(query, cols, k, flt, vector, score_threshold) -> list:
+    """Parte "cruda" de search_collections: devuelve [(coleccion, point)]
+    ordenado por score. Se separó del formateo porque la búsqueda de CVs
+    además necesita la metadata de cada hit para armar la lista de candidatos
+    que se muestra en la barra del chat — antes se perdía al concatenar todo
+    en un string."""
     if vector is None:
         vector = get_embeddings().embed_query(query)
     client = get_client()
@@ -163,8 +173,107 @@ def search_collections(
                 hits.extend(part)
 
     hits.sort(key=lambda cp: cp[1].score or 0.0, reverse=True)
-    top = hits[: k if len(cols) == 1 else k * 2]
-    return "\n".join(_format_hit(c, p) for c, p in top)
+    return hits[: k if len(cols) == 1 else k * 2]
+
+
+def _filtro_descartes(candidato_ids: list[int] | None) -> qm.Filter | None:
+    """Excluye candidatos descartados en la conversación (el "tacho" de la
+    barra de CVs). Se filtra EN QDRANT y no después: si se filtrara acá, un
+    descartado seguiría ocupando un lugar del top_k y el reclutador vería un
+    candidato menos por cada uno que tiró. Sin descartes devuelve None → la
+    búsqueda va sin filtro y no paga nada.
+
+    Necesita índice de payload en metadata.candidato_id (lo crea
+    ensure_indices_cv), si no Qdrant filtra escaneando."""
+    ids = [int(c) for c in (candidato_ids or []) if c is not None]
+    if not ids:
+        return None
+    return qm.Filter(must_not=[
+        qm.FieldCondition(key="metadata.candidato_id", match=qm.MatchAny(any=ids))
+    ])
+
+
+def _candidato_de_hit(col: str, p) -> dict | None:
+    """Datos mínimos del candidato desde el payload del punto. Devuelve None
+    para los puntos que no son CVs (procedimientos y demás)."""
+    meta = ((p.payload or {}).get("metadata") or {})
+    if meta.get("tipo_doc"):
+        return None
+    nombre = " ".join(x for x in [meta.get("nombre"), meta.get("apellido")] if x).strip()
+    cid = meta.get("candidato_id")
+    hash_archivo = meta.get("hash_archivo")
+    if not (cid or hash_archivo or nombre):
+        return None
+    return {
+        "candidato_id": int(cid) if cid is not None else None,
+        "nombre": meta.get("nombre") or nombre,
+        "apellido": meta.get("apellido") or "",
+        "nombre_completo": nombre or "Sin nombre",
+        "email": meta.get("email") or "",
+        "hash_archivo": hash_archivo,
+        "score": round(float(p.score or 0.0), 4),
+        "coleccion": col,
+    }
+
+
+def search_cvs(query: str, collections: list[str], k: int | None = None,
+               vector: list[float] | None = None,
+               descartados: list[int] | None = None) -> tuple[str, list[dict]]:
+    """Búsqueda de CVs: devuelve (contexto formateado, candidatos).
+
+    Los candidatos salen de los MISMOS hits que arma el contexto — no hay una
+    segunda consulta a Qdrant ni una vuelta más al embedding. Vienen ordenados
+    por relevancia y deduplicados: un CV largo entra con varios chunks y sin
+    dedup la barra mostraría a la misma persona tres veces."""
+    k = k or config.TOP_K
+    cols = [c for c in (collections or []) if c]
+    if not cols:
+        # mismo repliegue que search_collections: si el router se quedó sin
+        # lista (Qdrant no respondió el listado), se usa la colección por
+        # default antes que devolver "no hay candidatos"
+        avail = [c for c in list_collections() if c != config.PROC_COLLECTION]
+        if config.QDRANT_COLLECTION in avail:
+            cols = [config.QDRANT_COLLECTION]
+        elif avail:
+            cols = avail[:1]
+        else:
+            return "", []
+    hits = _buscar_hits(query, cols, k, _filtro_descartes(descartados), vector, None)
+    texto = "\n".join(_format_hit(c, p) for c, p in hits)
+
+    candidatos: list[dict] = []
+    vistos: dict = {}
+    for col, p in hits:
+        c = _candidato_de_hit(col, p)
+        if not c:
+            continue
+        clave = c["candidato_id"] or c["hash_archivo"] or c["nombre_completo"].lower()
+        if clave in vistos:
+            # mismo candidato en otro chunk: queda el mejor score
+            if c["score"] > vistos[clave]["score"]:
+                vistos[clave]["score"] = c["score"]
+            continue
+        vistos[clave] = c
+        candidatos.append(c)
+    return texto, candidatos
+
+
+def ensure_indices_cv() -> None:
+    """Índice de payload en metadata.candidato_id para las colecciones de CVs.
+    Idempotente (si ya existe, Qdrant tira y se ignora). Sin esto, el filtro
+    de descartados escanea la colección entera."""
+    client = get_client()
+    for col in list_collections():
+        if col == config.PROC_COLLECTION:
+            continue
+        try:
+            client.create_payload_index(
+                collection_name=col,
+                field_name="metadata.candidato_id",
+                field_schema=qm.PayloadSchemaType.INTEGER,
+            )
+        except Exception:
+            pass
 
 
 def embed_query(query: str) -> list[float]:

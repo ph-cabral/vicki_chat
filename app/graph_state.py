@@ -16,5 +16,7 @@ class AgentState(TypedDict):
     retrieved_docs: Optional[str]
     perfil_docs: Optional[str]           # ← descripción del puesto buscado (intent search/ranking)
     proc_docs: Optional[str]             # ← procedimientos/instructivos del puesto (intent search/ranking)
+    candidatos: Optional[list]           # ← candidatos de los hits de CVs (barra lateral del chat)
+    descartados: Optional[list]          # ← candidato_id tirados al tacho en esta conversación
     final_response: Optional[str]
     session_id: Optional[str]

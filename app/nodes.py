@@ -29,7 +29,7 @@ from app.tool import take_camera_snapshot
 from app.tools import (
     embed_query,
     list_collections,
-    search_collections,
+    search_cvs,
     search_descripcion_puesto,
     search_procedimientos,
 )
@@ -220,7 +220,8 @@ def rag_search_node(state: AgentState) -> AgentState:
             log.exception("rag_search (procedimiento) falló")
             docs = ""
         log.info(f"[RAG] proc query={query[:120]!r} {len(str(docs))} chars")
-        return {**state, "retrieved_docs": docs, "perfil_docs": "", "proc_docs": ""}
+        return {**state, "retrieved_docs": docs, "perfil_docs": "", "proc_docs": "",
+                "candidatos": []}
 
     # ── búsqueda de candidatos ────────────────────────────────────────────
     # Tres consultas a Qdrant que comparten el MISMO embedding:
@@ -229,11 +230,23 @@ def rag_search_node(state: AgentState) -> AgentState:
     #   proc   → procedimientos/instructivos: qué se HACE en el puesto
     # Van EN PARALELO porque son independientes; en serie la latencia se sumaba
     # una atrás de otra y esto corre en cada mensaje de búsqueda.
-    tareas = {
-        "cvs": lambda: search_collections(
-            query, state.get("collections") or [], vector=vector
-        ),
-    }
+    # search_cvs devuelve (contexto, candidatos): los candidatos salen de los
+    # mismos hits, para poder mostrar las miniaturas de los CVs al costado del
+    # chat sin una segunda búsqueda. `descartados` son los que el reclutador
+    # tiró al tacho en esta conversación: se excluyen en Qdrant.
+    cvs_res: dict = {"texto": "", "candidatos": []}
+
+    def _buscar_cvs():
+        texto, cands = search_cvs(
+            query,
+            state.get("collections") or [],
+            vector=vector,
+            descartados=state.get("descartados") or [],
+        )
+        cvs_res["texto"], cvs_res["candidatos"] = texto, cands
+        return texto
+
+    tareas = {"cvs": _buscar_cvs}
     if intent in ("search", "ranking"):
         tareas["perfil"] = lambda: search_descripcion_puesto(query, vector=vector)
         if config.PROC_CONTEXT_EN_BUSQUEDA:
@@ -256,11 +269,19 @@ def rag_search_node(state: AgentState) -> AgentState:
                 res[nombre] = ""
 
     docs, perfil, proc = res.get("cvs", ""), res.get("perfil", ""), res.get("proc", "")
+    candidatos = cvs_res["candidatos"]
     log.info(
         f"[RAG] query={query[:120]!r} cols={state.get('collections')} "
-        f"{len(docs)} chars cvs + {len(perfil)} chars perfil + {len(proc)} chars proc"
+        f"{len(docs)} chars cvs + {len(perfil)} chars perfil + {len(proc)} chars proc "
+        f"+ {len(candidatos)} candidatos ({len(state.get('descartados') or [])} descartados)"
     )
-    return {**state, "retrieved_docs": docs, "perfil_docs": perfil, "proc_docs": proc}
+    return {
+        **state,
+        "retrieved_docs": docs,
+        "perfil_docs": perfil,
+        "proc_docs": proc,
+        "candidatos": candidatos,
+    }
 
 
 def response_node(state: AgentState) -> AgentState:

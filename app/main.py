@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from app import cv_files
 from app.config import config
 from app.graph import build_graph
 from app.summary import load_context, strip_b64, update_summary
@@ -28,6 +29,7 @@ from app.tool import (
     take_camera_snapshot,
     upload_face_all,
 )
+from app.tools import ensure_indices_cv
 from app.user_registry import reserve_user_id
 
 logger = logging.getLogger(__name__)
@@ -88,7 +90,28 @@ async def lifespan(_app: FastAPI):
                 updated_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
+        # Metadata por mensaje: guarda los candidatos que se mostraron en la
+        # barra de CVs, para poder reconstruirla al recargar el historial
+        # (antes /history solo devolvía role + content).
+        await db_pool.execute(
+            "ALTER TABLE agent.chat_messages ADD COLUMN IF NOT EXISTS metadata JSONB"
+        )
+        # Candidatos tirados al tacho: salen de la conversación (barra y
+        # búsquedas siguientes), NO de la base ni de Qdrant.
+        await db_pool.execute("""
+            CREATE TABLE IF NOT EXISTS agent.chat_descartes (
+                session_id   TEXT NOT NULL,
+                candidato_id BIGINT NOT NULL,
+                created_at   TIMESTAMPTZ DEFAULT NOW(),
+                PRIMARY KEY (session_id, candidato_id)
+            )
+        """)
         logger.info("✅ Tablas verificadas/creadas.")
+        try:
+            # índice de payload en Qdrant para filtrar descartados sin escanear
+            ensure_indices_cv()
+        except Exception:
+            logger.exception("no pude verificar los índices de payload de CVs")
     except Exception as e:
         logger.error(f"❌ Error crítico en startup: {e}")
         raise
@@ -136,6 +159,9 @@ class ChatResponse(BaseModel):
     response: str
     session_id: str
     intent: Optional[str] = None
+    # candidatos de esta respuesta (barra de CVs): nombre, documento y si tiene
+    # archivo/miniatura para mostrar
+    candidatos: list = []
 
 
 def user_id_from_session(session_id: str) -> int:
@@ -151,16 +177,49 @@ async def del_draft(session_id: str):
     )
 
 
+def _json(v):
+    """asyncpg devuelve jsonb como str salvo que haya codec — tolerar ambos."""
+    if not v:
+        return None
+    return json.loads(v) if isinstance(v, (str, bytes)) else v
+
+
+async def _descartados(session_id: str) -> list[int]:
+    """candidato_id descartados en la conversación (lookup por PK)."""
+    try:
+        rows = await db_pool.fetch(
+            "SELECT candidato_id FROM agent.chat_descartes WHERE session_id = $1",
+            session_id,
+        )
+        return [int(r["candidato_id"]) for r in rows]
+    except Exception:
+        logger.exception("no pude leer los descartes de %s", session_id)
+        return []
+
+
 @app.get("/history/{session_id}")
 async def history(session_id: str):
     user_id = user_id_from_session(session_id)
     rows = await db_pool.fetch(
-        "SELECT role, content FROM agent.chat_messages "
+        "SELECT role, content, metadata FROM agent.chat_messages "
         "WHERE session_id = $1 AND user_id = $2 "
         "ORDER BY created_at ASC",
         session_id, user_id,
     )
-    return {"history": [{"role": r["role"], "content": r["content"]} for r in rows]}
+    descartados = await _descartados(session_id)
+    return {
+        "history": [
+            {
+                "role": r["role"],
+                "content": r["content"],
+                # los candidatos van en metadata.candidatos (mensajes "ai" de
+                # búsqueda); el resto de los mensajes no tiene nada
+                "metadata": _json(r["metadata"]),
+            }
+            for r in rows
+        ],
+        "descartados": descartados,
+    }
 
 
 async def del_asignar_draft(session_id: str):
@@ -516,13 +575,24 @@ async def chat(request: ChatRequest):
             "user_message": None,
             "retrieved_docs": None,
             "final_response": None,
+            # los descartados del tacho se excluyen de la búsqueda de CVs
+            "descartados": await _descartados(session_id),
         }
 
         result = await graph.ainvoke(initial_state, config=graph_config)
         answer = result["final_response"]
+
+        # Candidatos de la respuesta: salen de los hits de Qdrant y se
+        # completan con el documento (una sola consulta) para saber si hay
+        # archivo/miniatura que mostrar en la barra.
+        candidatos = await cv_files.enriquecer_candidatos(
+            db_pool, result.get("candidatos") or [], answer
+        )
+        meta = json.dumps({"candidatos": candidatos}) if candidatos else None
         await db_pool.execute(
-            "INSERT INTO agent.chat_messages (session_id, user_id, role, content) VALUES ($1, $2, $3, $4)",
-            session_id, user_id, "ai", strip_b64(answer)
+            "INSERT INTO agent.chat_messages (session_id, user_id, role, content, metadata) "
+            "VALUES ($1, $2, $3, $4, $5::jsonb)",
+            session_id, user_id, "ai", strip_b64(answer), meta
         )
 
         # antes esto bloqueaba la respuesta (y un fallo daba 500 con la respuesta ya generada)
@@ -532,6 +602,7 @@ async def chat(request: ChatRequest):
             response=answer,
             session_id=session_id,
             intent=result.get("intent"),
+            candidatos=candidatos,
         )
 
     except Exception as e:
@@ -578,6 +649,92 @@ async def rag_delete_documento(doc_id: int):
     except Exception as e:
         logger.exception(f"rag delete falló (doc {doc_id})")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── CV: archivo, miniatura y descartes ──────────────────────────────────────
+# El archivo lo escribe vicki_mail en el store compartido; acá se monta de solo
+# lectura (ver config.CV_STORE_DIR). Se sirve por documento_id: es la PK de
+# documento_aprobado, así que es un lookup directo.
+
+@app.get("/cv/{documento_id}/thumb")
+async def cv_thumb(documento_id: int):
+    doc = await cv_files.documento(db_pool, documento_id)
+    if not doc:
+        raise HTTPException(404, "documento inexistente")
+    ruta = cv_files.ruta_thumb(doc["hash_archivo"])
+    if not os.path.exists(ruta):
+        raise HTTPException(404, "sin miniatura")
+    # inmutable: el contenido está atado al hash del archivo
+    return FileResponse(ruta, media_type="image/jpeg",
+                        headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+
+@app.get("/cv/{documento_id}/file")
+async def cv_file(documento_id: int):
+    """PDF del CV para el visor del modal. Si no hay PDF (un .txt, o falló la
+    conversión) se devuelve el original; el front cae al texto si tampoco
+    puede mostrarlo."""
+    doc = await cv_files.documento(db_pool, documento_id)
+    if not doc:
+        raise HTTPException(404, "documento inexistente")
+    pdf = cv_files.ruta_pdf(doc["hash_archivo"])
+    if os.path.exists(pdf):
+        return FileResponse(
+            pdf, media_type="application/pdf",
+            headers={
+                "Cache-Control": "public, max-age=31536000, immutable",
+                # inline: se abre en el visor, no se descarga
+                "Content-Disposition": f'inline; filename="cv-{documento_id}.pdf"',
+            },
+        )
+    original = cv_files.ruta_original(doc["hash_archivo"])
+    if original:
+        return FileResponse(original, media_type=doc["mime_type"] or "application/octet-stream")
+    raise HTTPException(404, "sin archivo guardado")
+
+
+@app.get("/cv/{documento_id}/texto")
+async def cv_texto(documento_id: int):
+    """Contingencia para los CVs que todavía no tienen archivo local (los
+    históricos que el backfill no pudo matchear): el texto ya está en la base."""
+    doc = await cv_files.documento(db_pool, documento_id)
+    if not doc:
+        raise HTTPException(404, "documento inexistente")
+    return {
+        "nombre_archivo": doc["nombre_archivo"],
+        "texto": doc["texto_limpio"] or doc["texto_raw"] or "",
+    }
+
+
+class DescarteRequest(BaseModel):
+    candidato_id: int
+
+
+@app.get("/descartes/{session_id}")
+async def descartes_listar(session_id: str):
+    return {"descartados": await _descartados(session_id)}
+
+
+@app.post("/descartes/{session_id}")
+async def descartes_agregar(session_id: str, req: DescarteRequest):
+    """Saca al candidato de la conversación: no vuelve a aparecer en la barra
+    ni en las búsquedas de esta sesión. No toca la base ni Qdrant."""
+    await db_pool.execute(
+        "INSERT INTO agent.chat_descartes (session_id, candidato_id) VALUES ($1, $2) "
+        "ON CONFLICT DO NOTHING",
+        session_id, req.candidato_id,
+    )
+    return {"ok": True, "descartados": await _descartados(session_id)}
+
+
+@app.delete("/descartes/{session_id}/{candidato_id}")
+async def descartes_quitar(session_id: str, candidato_id: int):
+    """Deshacer: lo vuelve a poner en juego."""
+    await db_pool.execute(
+        "DELETE FROM agent.chat_descartes WHERE session_id = $1 AND candidato_id = $2",
+        session_id, candidato_id,
+    )
+    return {"ok": True, "descartados": await _descartados(session_id)}
 
 
 @app.get("/health")

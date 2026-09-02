@@ -28,6 +28,8 @@ services:
       TZ: ${TZ}
       CORS: ${CORS}
       PUBLIC_BASE_URL: http://10.10.0.159:8000
+      # store de archivos de CV que escribe vicki_mail (montado ro más abajo)
+      CV_STORE_DIR: /data/cv_store
     networks:
       - ai-net
     healthcheck:
@@ -37,6 +39,9 @@ services:
       retries: 5
     volumes:
       - ./snapshots:/code/snapshots
+      # mismo path host que vicki_mail monta rw: acá solo se leen los archivos
+      # para servirlos al chat
+      - ${CV_STORE_DIR:-/opt/vicki/cv_store}:/data/cv_store:ro
 
 networks:
   ai-net:
