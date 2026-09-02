@@ -749,6 +749,37 @@ async def health():
     return {"status": "ok" if db_ok else "degraded", "db": db_ok, "service": "chat-cv-agent"}
 
 
+@app.get("/diag/cvs")
+async def diag_cvs():
+    """Estado de la base de CVs que usa el chat: qué colecciones ve en Qdrant y
+    cuántos puntos tiene cada una. Sirve para separar "no hay nadie parecido"
+    de "el chat no está mirando ninguna colección" sin entrar al contenedor.
+    """
+    from app.tools import cv_collections, diagnostico_cvs, get_client, list_collections
+
+    try:
+        todas = list_collections()
+    except Exception:
+        logger.exception("diag/cvs: no pude listar colecciones")
+        todas = []
+    cvs = cv_collections()
+    conteo = {}
+    for c in cvs:
+        try:
+            conteo[c] = get_client().count(c, exact=True).count
+        except Exception:
+            conteo[c] = None
+    return {
+        "qdrant_url": config.QDRANT_URL,
+        "colecciones": todas,
+        "coleccion_cv_default": config.QDRANT_COLLECTION,
+        "coleccion_procedimientos": config.PROC_COLLECTION,
+        "colecciones_cv": cvs,
+        "puntos_por_coleccion": conteo,
+        "problema": diagnostico_cvs(cvs) or None,
+    }
+
+
 @app.post("/cancel_employee/{session_id}")
 async def cancel_employee(session_id: str):
     await del_draft(session_id)

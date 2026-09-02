@@ -293,6 +293,46 @@ def search_cvs(query: str, collections: list[str], k: int | None = None,
     return "\n".join(partes), candidatos
 
 
+def cv_collections() -> list[str]:
+    """Colecciones de CVs = todas menos la de procedimientos."""
+    return [c for c in list_collections() if c != config.PROC_COLLECTION]
+
+
+def diagnostico_cvs(collections: list[str] | None) -> str:
+    """Por qué una búsqueda de CVs volvió VACÍA. Se llama sólo cuando no salió
+    ningún candidato, así que no cuesta nada en el camino normal.
+
+    Existe porque los tres modos de fallar terminaban en la misma respuesta
+    ("no hay candidatos relevantes") y el reclutador no puede distinguir
+    "no hay nadie parecido" de "el chat no está mirando ninguna colección":
+      - Qdrant no responde       → list_collections() vuelve vacío
+      - no existe la colección de CVs (ej. `cvs` nunca se creó porque todavía
+        no entró ningún CV por vicki_mail, o el contenedor apunta a otro Qdrant)
+      - la colección existe pero está vacía
+    Devuelve "" si no hay nada raro que avisar (entonces sí: no hay parecidos).
+    """
+    try:
+        todas = list_collections()
+    except Exception:
+        return "Qdrant no respondió el listado de colecciones."
+    if not todas:
+        return ("Qdrant no devolvió ninguna colección: el chat no tiene dónde "
+                "buscar CVs (¿está caído o QDRANT_URL apunta a otro lado?).")
+    cols = [c for c in (collections or []) if c] or cv_collections()
+    if not cols:
+        return (f"No existe ninguna colección de CVs en Qdrant "
+                f"(hay: {', '.join(todas)}). Los CVs los ingesta vicki_mail en "
+                f"{config.QDRANT_COLLECTION!r}.")
+    try:
+        total = sum(get_client().count(c, exact=False).count for c in cols)
+    except Exception:
+        log.exception("no pude contar puntos de las colecciones de CVs")
+        return f"No pude leer las colecciones de CVs ({', '.join(cols)})."
+    if total == 0:
+        return f"Las colecciones de CVs ({', '.join(cols)}) están vacías: 0 CVs cargados."
+    return ""
+
+
 def ensure_indices_cv() -> None:
     """Índice de payload en metadata.candidato_id para las colecciones de CVs.
     Idempotente (si ya existe, Qdrant tira y se ignora). Sin esto, el filtro

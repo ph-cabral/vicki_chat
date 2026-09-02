@@ -28,6 +28,7 @@ from app.prompts import (
 )
 from app.tool import take_camera_snapshot
 from app.tools import (
+    diagnostico_cvs,
     embed_query,
     list_collections,
     search_cvs,
@@ -271,6 +272,15 @@ def rag_search_node(state: AgentState) -> AgentState:
 
     docs, perfil, proc = res.get("cvs", ""), res.get("perfil", ""), res.get("proc", "")
     candidatos = cvs_res["candidatos"]
+    # Sin candidatos: averiguar si es "no hay nadie parecido" o un problema de
+    # infraestructura (Qdrant caído, colección de CVs inexistente o vacía).
+    # Antes las tres cosas terminaban en la misma respuesta y el reclutador
+    # concluía que no había gente cargada.
+    cv_diag = ""
+    if not candidatos:
+        cv_diag = diagnostico_cvs(state.get("collections"))
+        if cv_diag:
+            log.error(f"[RAG] búsqueda de CVs vacía → {cv_diag}")
     log.info(
         f"[RAG] query={query[:120]!r} cols={state.get('collections')} "
         f"{len(docs)} chars cvs + {len(perfil)} chars perfil + {len(proc)} chars proc "
@@ -282,6 +292,7 @@ def rag_search_node(state: AgentState) -> AgentState:
         "perfil_docs": perfil,
         "proc_docs": proc,
         "candidatos": candidatos,
+        "cv_diag": cv_diag,
     }
 
 
@@ -332,6 +343,16 @@ def response_node(state: AgentState) -> AgentState:
     # que hacía que una búsqueda sin match perfecto terminara en "no tengo nada".
     n_cands = len(state.get("candidatos") or []) or len(names)
     shortlist_block = SHORTLIST_RULES.format(n=n_cands) if n_cands else ""
+    # Falla de infraestructura, no ausencia de gente: se lo decimos al modelo
+    # para que no responda "no hay candidatos para ese puesto" cuando en
+    # realidad no pudo mirar ningún CV.
+    diag = (state.get("cv_diag") or "").strip()
+    diag_block = (
+        f"\n# AVISO TÉCNICO (no es que no haya gente)\n{diag}\n"
+        f"Decíselo al usuario tal cual: la búsqueda no pudo leer CVs, así que no "
+        f"podés afirmar que no hay candidatos para el puesto. Es un problema de "
+        f"configuración/ingesta a revisar, no un resultado de la búsqueda.\n"
+    ) if diag else ""
     context_prompt = (
         f"{perfil_block}"
         f"{proc_block}"
@@ -340,6 +361,7 @@ def response_node(state: AgentState) -> AgentState:
         f"{docs if docs else '(no hay ningún CV cargado que se acerque)'}\n\n"
         f"## Consulta del usuario:\n{state['user_message']}\n\n"
         f"{shortlist_block}\n"
+        f"{diag_block}"
         f"{grounding}\n"
         f"Respondé apoyándote en los CVs de arriba. No inventes datos. "
         f"Si de verdad no hay ningún CV en la shortlist, decilo y ofrecé ampliar "
