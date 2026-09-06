@@ -23,13 +23,18 @@ services:
       HIK_DEVICES: ${HIK_DEVICES}
       HIK_IPS: ${HIK_IPS}
       QDRANT_URL: http://n8n_qdrant:6333
-      QDRANT_COLLECTION: cvs
+      QDRANT_COLLECTION: postulantes
       MODEL_NAME: gpt-4.1-mini
       TZ: ${TZ}
       CORS: ${CORS}
       PUBLIC_BASE_URL: http://10.10.0.159:8000
       # store de archivos de CV que escribe vicki_mail (montado ro más abajo)
       CV_STORE_DIR: /data/cv_store
+      # Servicio de red de mcp-magnus (intent "ventas") — ver
+      # vicki/mcp/mcp-magnus/README.md "Modo servicio de red". Ej:
+      # http://10.10.0.XX:8765/mcp (la PC/VM Windows donde corre). Vacío =
+      # intent "ventas" deshabilitado (avisa en el chat en vez de fallar).
+      MAGNUS_MCP_URL: ${MAGNUS_MCP_URL:-}
     networks:
       - ai-net
     healthcheck:

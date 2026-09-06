@@ -21,3 +21,10 @@ class AgentState(TypedDict):
     descartados: Optional[list]          # ← candidato_id tirados al tacho en esta conversación
     final_response: Optional[str]
     session_id: Optional[str]
+    # ── Intent "ventas" — ver app/ventas_tools.py ──────────────────────────
+    # Resueltos por vicki_web contra la sesión autenticada (nunca por el
+    # usuario ni por el LLM) y reenviados en cada /chat — ver
+    # lib/ventas/vickiVentasAcceso.ts y app/main.py.
+    ventas_habilitado: Optional[bool]     # False = el intent "ventas" no se ofrece
+    ventas_admin: Optional[bool]          # True = sin filtro de vendedor (toda la empresa)
+    ventas_vendedor_codigo: Optional[int] # código Magnus fijo para este usuario, o None si es admin

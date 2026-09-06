@@ -119,7 +119,7 @@ router_llm = LLMWithFallback(
     ),
 )
 
-VALID_INTENTS = {"search", "ranking", "procedimiento", "camera", "general"}
+VALID_INTENTS = {"search", "ranking", "procedimiento", "ventas", "camera", "general"}
 
 
 def _safe_json(text: str) -> dict:
@@ -379,6 +379,33 @@ def response_node(state: AgentState) -> AgentState:
         "messages": state["messages"] + [response],
         "final_response": response.content,
     }
+
+
+async def ventas_node(state: AgentState) -> AgentState:
+    """Intent "ventas": facturación/ranking propio. Toda la lógica de qué
+    puede ver cada usuario vive en app/ventas_tools.py y en cómo llegó el
+    estado (ver graph_state.py) — acá solo se valida el gate de habilitación
+    y se delega. No pasa por response_node: la respuesta ya sale formateada
+    con números reales, no hace falta que el LLM la "redacte" (y así no hay
+    riesgo de que reescriba una cifra)."""
+    from app.ventas_tools import responder_ventas
+
+    habilitado = state.get("ventas_habilitado")
+    es_admin = state.get("ventas_admin") or False
+    vendedor_codigo = state.get("ventas_vendedor_codigo")
+
+    if not habilitado:
+        texto = (
+            "No tenés habilitado el acceso a datos de ventas todavía. "
+            "Pedile a un administrador que te lo active en Administración → "
+            "Usuarios (y que te asigne tu código de vendedor, si todavía no "
+            "lo tenés)."
+        )
+    else:
+        texto = await responder_ventas(state["user_message"], vendedor_codigo, es_admin)
+
+    response = AIMessage(content=texto)
+    return {**state, "messages": state["messages"] + [response], "final_response": texto}
 
 
 def camera_node(state):

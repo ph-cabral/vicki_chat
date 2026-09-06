@@ -158,7 +158,7 @@ def search_cvs(query: str, limit: int = 5) -> str:
         resp = openai_client.embeddings.create(input=query, model="text-embedding-3-small")
         vector = resp.data[0].embedding
         results = qdrant.query_points(
-            os.getenv("QDRANT_COLLECTION", "cvs"), query=vector, limit=limit, with_payload=True
+            os.getenv("QDRANT_COLLECTION", "postulantes"), query=vector, limit=limit, with_payload=True
         )
     except Exception:
         # sin búsqueda vectorial el chat sigue funcionando, solo sin contexto de CVs

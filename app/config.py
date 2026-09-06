@@ -35,7 +35,7 @@ class Config:
     ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
     QDRANT_URL: str = os.getenv("QDRANT_URL", "http://n8n_qdrant:6333")
     QDRANT_API_KEY: str = os.getenv("QDRANT_API_KEY", "")
-    QDRANT_COLLECTION: str = os.getenv("QDRANT_COLLECTION", "cvs")  # fallback si el router no elige
+    QDRANT_COLLECTION: str = os.getenv("QDRANT_COLLECTION", "postulantes")  # fallback si el router no elige
     # Colección de documentos por puesto (ingesta desde ever /rrhh/puestos):
     # procedimientos, instructivos Y descripciones de puesto. Se separan por
     # metadata.tipo_doc — ver tools.py::_filtro_tipo_doc.
@@ -79,6 +79,13 @@ class Config:
     # SOLO LECTURA. Layout: <hash[:2]>/<hash>/{original.ext,doc.pdf,thumb.jpg}
     # — ver vicki_mail/app/cv_store.py.
     CV_STORE_DIR: str = os.getenv("CV_STORE_DIR", "/data/cv_store")
+    # ── Datos de ventas (intent "ventas") ─────────────────────────────────────
+    # URL del servicio de red de mcp-magnus (streamable-http), corriendo en una
+    # PC/VM Windows de la LAN con acceso al SQL Server de Magnus — ver
+    # vicki/mcp/mcp-magnus/README.md "Modo servicio de red". Vacío = el intent
+    # "ventas" queda deshabilitado (avisa en vez de fallar en cada mensaje).
+    MAGNUS_MCP_URL: str = os.getenv("MAGNUS_MCP_URL", "")
+    MAGNUS_MCP_TIMEOUT: float = float(os.getenv("MAGNUS_MCP_TIMEOUT", "20"))
 
 
 config = Config()

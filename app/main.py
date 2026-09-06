@@ -153,6 +153,15 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None
     gender: Optional[str] = None
     location: Optional[str] = None
+    # Acceso a datos de ventas (intent "ventas") — SIEMPRE resueltos por
+    # vicki_web contra la sesión autenticada del usuario (ver
+    # lib/ventas/vickiVentasAcceso.ts), nunca elegidos por el front. Este
+    # backend no vuelve a validarlos porque no tiene sesión propia; confía en
+    # que solo vicki_web le pega a este endpoint — ver docstring de
+    # app/ventas_tools.py para por qué esto es crítico.
+    vicki_ventas_habilitado: bool = False
+    vicki_ventas_admin: bool = False
+    vicki_ventas_vendedor_codigo: Optional[int] = None
 
 
 class ChatResponse(BaseModel):
@@ -577,6 +586,10 @@ async def chat(request: ChatRequest):
             "final_response": None,
             # los descartados del tacho se excluyen de la búsqueda de CVs
             "descartados": await _descartados(session_id),
+            # intent "ventas" — ver docstring de ChatRequest y app/ventas_tools.py
+            "ventas_habilitado": request.vicki_ventas_habilitado,
+            "ventas_admin": request.vicki_ventas_admin,
+            "ventas_vendedor_codigo": request.vicki_ventas_vendedor_codigo,
         }
 
         result = await graph.ainvoke(initial_state, config=graph_config)

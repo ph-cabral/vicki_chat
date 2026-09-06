@@ -13,6 +13,12 @@ langchain-qdrant>=0.2.0
 langchain-anthropic>=0.3.0
 qdrant-client>=1.11.0
 
+# Datos de ventas (intent "ventas", ver app/ventas_tools.py): cliente MCP para
+# hablar con mcp-magnus (server de solo lectura sobre el SQL Server de
+# Magnus), que corre como servicio de red en una PC/VM Windows aparte — ver
+# vicki/mcp/mcp-magnus/README.md "Modo servicio de red".
+langchain-mcp-adapters>=0.1.0
+
 # DB
 asyncpg>=0.29.0
 psycopg2-binary

@@ -8,6 +8,7 @@ from app.nodes import (
     rag_search_node,
     response_node,
     camera_node,
+    ventas_node,
 )
 
 
@@ -15,6 +16,8 @@ def route_after_classification(state):
     intent = state.get("intent")
     if intent == "camera":
         return "camera"
+    if intent == "ventas":
+        return "ventas"
     if intent in ("search", "ranking", "procedimiento"):
         return "rag_search"
     return "general"
@@ -27,6 +30,7 @@ def build_graph():
     builder.add_node("rag_search", rag_search_node)
     builder.add_node("response", response_node)
     builder.add_node("camera", camera_node)
+    builder.add_node("ventas", ventas_node)
     builder.set_entry_point("router")
     builder.add_conditional_edges(
         "router",
@@ -35,10 +39,12 @@ def build_graph():
             "general": "general",
             "rag_search": "rag_search",
             "camera": "camera",
+            "ventas": "ventas",
         },
     )
     builder.add_edge("rag_search", "response")
     builder.add_edge("response", END)
     builder.add_edge("general", END)
     builder.add_edge("camera", END)
+    builder.add_edge("ventas", END)
     return builder

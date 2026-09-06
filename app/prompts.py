@@ -69,7 +69,7 @@ Contexto reciente de la conversación (para interpretar referencias como
 {history}
 
 Clasificá el ÚLTIMO mensaje del usuario y devolvé SOLO un JSON válido, sin texto extra:
-{{"intent": "<search|ranking|procedimiento|camera|general>", "query": "..."}}
+{{"intent": "<search|ranking|procedimiento|ventas|camera|general>", "query": "..."}}
 
 Reglas:
 - "search": pide/busca candidatos o perfiles para un puesto.
@@ -78,8 +78,18 @@ Reglas:
   hace/qué pasos tiene" una tarea/situación interna de la empresa (ej. "¿cuál es
   el procedimiento ante un accidente?", "instructivo de picking", "¿cómo se
   carga una nota de crédito?", "qué procedimientos tiene el puesto X").
+- "ventas": pregunta por facturación, ventas o desempeño comercial — SU
+  PROPIA ("cómo vengo este mes", "cuánto facturé", "mis ventas de agosto") o
+  comparando VENDEDORES YA EMPLEADOS ("qué vendedor vendió más en agosto",
+  "ranking de vendedores", "quién factura más"). Si no está habilitado o no
+  tiene permiso para ver el ranking, igual clasificalo así — esa respuesta la
+  da el nodo, no vos.
+  OJO, no confundir con "search"/"ranking": si preguntan por CANDIDATOS para
+  CONTRATAR a un puesto de vendedor ("busco un vendedor mostrador", "candidatos
+  para vendedor viajante"), eso es "search", no "ventas". La diferencia es
+  personal a contratar (search) vs. desempeño de ventas ya realizadas (ventas).
 - "camera": pide una foto/snapshot de una cámara o reloj.
-- "general": saludo, charla, dudas o cualquier cosa que NO sea búsqueda de perfiles ni procedimientos.
+- "general": saludo, charla, dudas o cualquier cosa que NO sea búsqueda de perfiles, procedimientos ni ventas propias.
 - "query": para search/ranking/procedimiento. Reformulá el pedido como una búsqueda
   AUTOCONTENIDA (standalone), incorporando el puesto/skills/zona que ya se
   hablaron en la conversación si el último mensaje es una referencia o un
