@@ -239,6 +239,13 @@ def search_cvs(query: str, collections: list[str], k: int | None = None,
     Sin piso de score a propósito: la shortlist es "lo más parecido que hay",
     no "lo que matchea". El encaje parcial lo explica el modelo, no se filtra
     acá — ver prompts.py::SHORTLIST_RULES.
+
+    Lo que SÍ se hace es MARCAR el encaje débil: los que quedan por debajo de
+    config.CANDIDATO_MIN_SCORE salen con `encaje_debil=True` y el contexto los
+    rotula. Sin eso, el 5º lugar de la shortlist lo ocupaba cualquier CV (uno
+    de limpieza en una búsqueda administrativa) y el modelo lo presentaba como
+    candidato al mismo nivel que el #1, porque en el prompt no había forma de
+    distinguirlos: todos llegaban como "los N más cercanos".
     """
     top_n = top_n or config.CANDIDATOS_TOP_N
     por_cand = max(1, config.CV_CHUNKS_POR_CANDIDATO)
@@ -283,12 +290,25 @@ def search_cvs(query: str, collections: list[str], k: int | None = None,
         c["posicion"] = len(candidatos) + 1
         candidatos.append(c)
 
+    # Encaje débil: se calcula DESPUÉS del agrupado porque el score de cada
+    # persona es el del MEJOR de sus chunks, y ese máximo recién se conoce al
+    # terminar el loop (un CV puede entrar por un chunk flojo y tener otro
+    # mucho mejor más abajo).
+    piso = config.CANDIDATO_MIN_SCORE
+    for c in candidatos:
+        c["encaje_debil"] = bool(piso) and c["score"] < piso
+
     # El contexto va ordenado por candidato (no chunk por chunk intercalado):
     # el modelo tiene que poder leer a cada persona entera y de mayor a menor.
     partes: list[str] = []
     for c in candidatos:
         clave = c["candidato_id"] or c["hash_archivo"] or c["nombre_completo"].lower()
-        partes.append(f"\n### Candidato #{c['posicion']} — {c['nombre_completo']}")
+        etiqueta = (
+            f" — ⚠️ ENCAJE DÉBIL (relevancia {c['score']:.2f}, "
+            f"por debajo del piso {piso:.2f})"
+            if c["encaje_debil"] else f" (relevancia {c['score']:.2f})"
+        )
+        partes.append(f"\n### Candidato #{c['posicion']} — {c['nombre_completo']}{etiqueta}")
         partes.extend(_format_hit(col, p) for col, p in chunks[clave])
     return "\n".join(partes), candidatos
 

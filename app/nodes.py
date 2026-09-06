@@ -18,6 +18,8 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from app.config import config
 from app.graph_state import AgentState
 from app.prompts import (
+    ENCAJE_DEBIL_RULES,
+    ENCAJE_DEBIL_TODOS,
     GROUNDING_RULES,
     PERFIL_BLOCK,
     PROC_CONTEXT_BLOCK,
@@ -341,8 +343,19 @@ def response_node(state: AgentState) -> AgentState:
     # cercanos, sin piso de score). Acá solo se le dice al modelo que la
     # presente entera y en orden: el filtro "¿califica o no?" era justamente lo
     # que hacía que una búsqueda sin match perfecto terminara en "no tengo nada".
-    n_cands = len(state.get("candidatos") or []) or len(names)
+    cands = state.get("candidatos") or []
+    n_cands = len(cands) or len(names)
     shortlist_block = SHORTLIST_RULES.format(n=n_cands) if n_cands else ""
+    # Encaje débil: la shortlist es de tamaño fijo, así que cuando no hay gente
+    # del rubro los últimos lugares se llenan con cualquier CV. search_cvs los
+    # marca (score bajo config.CANDIDATO_MIN_SCORE) y acá se le dice al modelo
+    # cómo presentarlos: aparte, sin buscarles el lado bueno. Si TODOS son
+    # débiles, la respuesta arranca por "no hay candidatos".
+    n_debiles = sum(1 for c in cands if c.get("encaje_debil"))
+    if n_debiles and n_debiles == len(cands):
+        shortlist_block += ENCAJE_DEBIL_TODOS.format(n=n_cands)
+    elif n_debiles:
+        shortlist_block += ENCAJE_DEBIL_RULES.format(n_debiles=n_debiles, n=n_cands)
     # Falla de infraestructura, no ausencia de gente: se lo decimos al modelo
     # para que no responda "no hay candidatos para ese puesto" cuando en
     # realidad no pudo mirar ningún CV.

@@ -28,7 +28,11 @@ presentes como si fueran una persona.
   todos, en ese orden, aclarando honestamente qué le falta a cada uno (zona,
   rubro, años), y en la MISMA respuesta sugerí cómo ampliar la búsqueda (otra
   zona, rubro afín, menos experiencia exigida). Nunca cierres en seco con "no
-  tengo nada relevante" si la shortlist tiene gente.
+  tengo nada relevante" si la shortlist tiene gente que se acerque.
+- Distinto es cuando los candidatos vienen marcados "⚠️ ENCAJE DÉBIL": ahí la
+  búsqueda trajo lo único que había, pero no tiene que ver con el puesto. Eso
+  SÍ se dice de frente ("no hay candidatos para este puesto"), sin inflar el
+  perfil de alguien que hace otra cosa para que parezca una opción.
 - Presentá cada candidato con nombre, experiencia relevante y por qué encaja
   (o por qué es la mejor aproximación disponible aunque no sea perfecta).
 - No filtres por género salvo pedido explícito.
@@ -168,8 +172,42 @@ más parecido que hay en la base.
   qué le falta contra la descripción del puesto. Si le falta un excluyente,
   decilo sin vueltas — pero igual mostralo.
 - No descartes a nadie de la lista por no encajar del todo: el reclutador
-  decide, vos mostrás.
+  decide, vos mostrás. Única excepción: los marcados "⚠️ ENCAJE DÉBIL", que
+  se presentan aparte — ver el bloque de más abajo si aparece.
 - Cerrá con una línea de cómo ampliar o afinar la búsqueda.
+"""
+
+# Se agrega a SHORTLIST_RULES sólo cuando alguno de los candidatos vino marcado
+# "⚠️ ENCAJE DÉBIL" desde tools.py::search_cvs (score bajo el piso).
+# {n_debiles} de {n} en total. Existe porque la shortlist es de tamaño FIJO: si
+# en la base no hay 5 personas del rubro, los últimos lugares se llenan con lo
+# que haya (un CV de limpieza en una búsqueda administrativa) y sin este bloque
+# el modelo los presentaba como candidatos válidos, con la misma prosa que al #1.
+ENCAJE_DEBIL_RULES = """
+# Encaje débil ({n_debiles} de {n})
+Los candidatos marcados "⚠️ ENCAJE DÉBIL" NO son candidatos al puesto: están en
+la lista sólo porque la shortlist tiene tamaño fijo y no hay más gente cercana
+cargada. Tratalos distinto:
+- Separalos del resto, después de los que sí se acercan, bajo un título del
+  estilo "Sin relación con el puesto (aparecen por falta de candidatos)".
+- Una línea por cada uno: nombre y qué hace en realidad. Nada de buscarles el
+  lado positivo ni de listarles "lo que aporta" contra este puesto.
+- Decí explícitamente que no son perfiles para esta búsqueda.
+"""
+
+# Variante para el caso extremo: TODOS los de la shortlist son encaje débil.
+# La respuesta honesta ahí es "no hay nadie", pero mostrando igual qué se
+# encontró para que el reclutador vea que la búsqueda corrió.
+ENCAJE_DEBIL_TODOS = """
+# Ojo: NINGÚN candidato se acerca al puesto
+Los {n} perfiles de arriba vinieron todos marcados "⚠️ ENCAJE DÉBIL": son lo
+único que devolvió la búsqueda, pero ninguno tiene que ver con lo que se pide.
+- Empezá diciendo claramente que NO hay candidatos para ese puesto en la base.
+- Recién después, y en una línea cada uno, mostrá qué apareció y por qué no
+  sirve (así el reclutador ve que la búsqueda corrió y qué hay cargado).
+- No les armes el "lo que aporta / lo que le falta": no son candidatos.
+- Cerrá proponiendo cómo conseguir perfiles (ampliar zona, rubro afín, publicar
+  la búsqueda) en vez de cómo afinar el filtro.
 """
 
 # {names} = candidatos realmente presentes en los CVs recuperados (nombres exactos).

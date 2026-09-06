@@ -66,6 +66,16 @@ class Config:
     # Chunks por persona que entran al contexto (los mejores). Acota el prompt:
     # sin tope, un CV de 12 chunks desplaza a los otros 4 candidatos.
     CV_CHUNKS_POR_CANDIDATO: int = int(os.getenv("CV_CHUNKS_POR_CANDIDATO", "3"))
+    # Piso de encaje: por DEBAJO de este score el candidato sigue entrando a la
+    # shortlist pero marcado como ENCAJE DÉBIL (ver tools.py::search_cvs y
+    # prompts.py::ENCAJE_DEBIL_RULES). NO se filtra: la shortlist es de tamaño
+    # fijo y, si se recortara, una búsqueda sin match perfecto volvería a
+    # terminar en "no tengo candidatos" — que es justo lo que se quería evitar.
+    # Lo que arregla es lo contrario: que un CV de limpieza aparezca presentado
+    # como candidato válido a un puesto administrativo sólo por ocupar el 5º
+    # lugar. Cosine sobre text-embedding-3-small: un CV del rubro correcto anda
+    # por 0.40-0.55; abajo de 0.35 ya suele ser otro palo.
+    CANDIDATO_MIN_SCORE: float = float(os.getenv("CANDIDATO_MIN_SCORE", "0.35"))
     # ── Procedimientos/instructivos como contexto al BUSCAR CANDIDATOS ────────
     # Además del perfil (qué se pide), se inyecta qué HACE el puesto. Va con
     # piso de score porque la query es de candidatos, no de procedimientos: sin
