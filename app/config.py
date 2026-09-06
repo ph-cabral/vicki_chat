@@ -86,6 +86,16 @@ class Config:
     # "ventas" queda deshabilitado (avisa en vez de fallar en cada mensaje).
     MAGNUS_MCP_URL: str = os.getenv("MAGNUS_MCP_URL", "")
     MAGNUS_MCP_TIMEOUT: float = float(os.getenv("MAGNUS_MCP_TIMEOUT", "20"))
+    # Camino preferido (2026-09-06): endpoint JSON plano del MISMO server, sin
+    # protocolo MCP. El transporte streamable-http del SDK MCP no funciona en
+    # srv-active (mcp 1.29.1 + starlette 1.6.0: acepta el TCP y nunca responde,
+    # también contra 127.0.0.1) — ver mcp-magnus/README.md "Modo endpoint HTTP".
+    # Ej: http://10.10.0.232:8765/sql. Si está seteada, se usa esta y se ignora
+    # MAGNUS_MCP_URL; si está vacía, se cae al camino MCP de antes.
+    MAGNUS_SQL_URL: str = os.getenv("MAGNUS_SQL_URL", "")
+    # Token compartido (header X-Api-Token) — tiene que coincidir con el
+    # HTTP_API_TOKEN del .env de mcp-magnus. Vacío = el server no lo exige.
+    MAGNUS_API_TOKEN: str = os.getenv("MAGNUS_API_TOKEN", "")
 
 
 config = Config()

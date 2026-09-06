@@ -231,8 +231,40 @@ class _FalloMagnus(Exception):
     tenga que repetir el mismo try/except en cada report."""
 
 
+def _ejecutar_sql_http(sql: str) -> str:
+    """POST /sql al servicio de magnus (endpoint JSON plano, sin MCP).
+
+    Es el camino preferido desde 2026-09-06: el transporte streamable-http del
+    SDK MCP no anda en srv-active (acepta el TCP y nunca responde, también
+    contra 127.0.0.1 — no es red), así que el mismo server.py expone las
+    consultas como JSON usando http.server de la stdlib. Sincrónico a
+    propósito: lo llama _ejecutar_sql con asyncio.to_thread, y `requests` ya
+    era dependencia. Ver mcp-magnus/README.md "Modo endpoint HTTP"."""
+    import requests
+
+    headers = {"Content-Type": "application/json"}
+    if config.MAGNUS_API_TOKEN:
+        headers["X-Api-Token"] = config.MAGNUS_API_TOKEN
+    r = requests.post(
+        config.MAGNUS_SQL_URL,
+        json={"sql": sql, "db": "EVERWEAR", "max_rows": 60},
+        headers=headers,
+        timeout=config.MAGNUS_MCP_TIMEOUT,
+    )
+    try:
+        data = r.json()
+    except ValueError:
+        raise RuntimeError(f"respuesta no-JSON de magnus (HTTP {r.status_code})")
+    if not data.get("ok"):
+        # El server distingue 400 (SQL rechazado / pedido mal armado) de 500
+        # (falla contra el SQL Server). Los dos son bug nuestro, no del usuario:
+        # que quede en el log con el detalle.
+        raise RuntimeError(f"magnus HTTP {r.status_code}: {data.get('error')}")
+    return data["tsv"]
+
+
 async def _ejecutar_sql(sql: str) -> str:
-    """Corre `sql` contra mcp-magnus con timeout duro (config.MAGNUS_MCP_TIMEOUT).
+    """Corre `sql` contra magnus con timeout duro (config.MAGNUS_MCP_TIMEOUT).
 
     Sin este timeout, si el servicio de red no contesta (firewall cerrado,
     la PC/VM Windows apagada, IP mal puesta) el pedido queda colgado hasta que
@@ -241,12 +273,15 @@ async def _ejecutar_sql(sql: str) -> str:
     devolvemos un error entendible."""
     try:
         async def _llamar():
+            if config.MAGNUS_SQL_URL:
+                return await asyncio.to_thread(_ejecutar_sql_http, sql)
             tool = await _get_query_tool()
             return await tool.ainvoke({"sql": sql, "db": "EVERWEAR", "max_rows": 60})
 
         return await asyncio.wait_for(_llamar(), timeout=config.MAGNUS_MCP_TIMEOUT)
     except asyncio.TimeoutError as e:
-        log.error(f"mcp-magnus no respondió en {config.MAGNUS_MCP_TIMEOUT}s (MAGNUS_MCP_URL={config.MAGNUS_MCP_URL!r})")
+        destino = config.MAGNUS_SQL_URL or config.MAGNUS_MCP_URL
+        log.error(f"magnus no respondió en {config.MAGNUS_MCP_TIMEOUT}s (destino={destino!r})")
         raise _FalloMagnus("timeout") from e
     except Exception as e:
         log.exception("consulta a magnus falló")
@@ -267,10 +302,10 @@ async def responder_ventas(mensaje: str, vendedor_codigo: int | None, es_admin: 
     módulo. Nunca levanta excepción hacia afuera: cualquier falla se convierte
     en un mensaje explicando qué pasó (infra vs. sin datos), mismo criterio
     que `diagnostico_cvs` en tools.py."""
-    if not config.MAGNUS_MCP_URL:
+    if not (config.MAGNUS_SQL_URL or config.MAGNUS_MCP_URL):
         return (
             "Todavía no tengo conectada la base de ventas (falta configurar "
-            "MAGNUS_MCP_URL). Avisale a sistemas — no es que no haya datos, es "
+            "MAGNUS_SQL_URL). Avisale a sistemas — no es que no haya datos, es "
             "que esta parte no está prendida."
         )
 
