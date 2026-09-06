@@ -21,6 +21,7 @@ DISEÑO DE SEGURIDAD (leer antes de tocar este archivo):
   empresa sin filtro — eso lo decide vicki_web, acá solo se respeta lo que
   llega.
 """
+import asyncio
 import datetime as dt
 import logging
 import re
@@ -224,6 +225,42 @@ async def _get_query_tool():
     return tool
 
 
+class _FalloMagnus(Exception):
+    """Cualquier problema hablando con mcp-magnus (timeout, red caída, el
+    server no responde). Un único tipo de error para que responder_ventas no
+    tenga que repetir el mismo try/except en cada report."""
+
+
+async def _ejecutar_sql(sql: str) -> str:
+    """Corre `sql` contra mcp-magnus con timeout duro (config.MAGNUS_MCP_TIMEOUT).
+
+    Sin este timeout, si el servicio de red no contesta (firewall cerrado,
+    la PC/VM Windows apagada, IP mal puesta) el pedido queda colgado hasta que
+    lo aborta el FRONT — 60s en vicki_web — dejando al usuario 60 segundos
+    esperando y sin un mensaje claro de qué pasó. Acá cortamos antes y
+    devolvemos un error entendible."""
+    try:
+        async def _llamar():
+            tool = await _get_query_tool()
+            return await tool.ainvoke({"sql": sql, "db": "EVERWEAR", "max_rows": 60})
+
+        return await asyncio.wait_for(_llamar(), timeout=config.MAGNUS_MCP_TIMEOUT)
+    except asyncio.TimeoutError as e:
+        log.error(f"mcp-magnus no respondió en {config.MAGNUS_MCP_TIMEOUT}s (MAGNUS_MCP_URL={config.MAGNUS_MCP_URL!r})")
+        raise _FalloMagnus("timeout") from e
+    except Exception as e:
+        log.exception("consulta a magnus falló")
+        raise _FalloMagnus(str(e)) from e
+
+
+_MSG_FALLO_MAGNUS = (
+    "No pude consultar la base de ventas ahora mismo (no responde el "
+    "servicio de Magnus). Probá de nuevo en un rato; si sigue fallando, "
+    "avisale a sistemas — puede ser que el servicio esté caído o que se haya "
+    "cortado la red."
+)
+
+
 async def responder_ventas(mensaje: str, vendedor_codigo: int | None, es_admin: bool) -> str:
     """Punto de entrada del intent "ventas". `vendedor_codigo` ya viene
     resuelto y validado por el caller (nodes.py) — ver el docstring del
@@ -251,15 +288,9 @@ async def responder_ventas(mensaje: str, vendedor_codigo: int | None, es_admin: 
             )
         sql = _sql_ranking_vendedores(desde, hasta)
         try:
-            tool = await _get_query_tool()
-            tsv = await tool.ainvoke({"sql": sql, "db": "EVERWEAR", "max_rows": 60})
-        except Exception:
-            log.exception("ranking de vendedores a magnus falló")
-            return (
-                "No pude consultar la base de ventas ahora mismo (problema de "
-                "conexión con Magnus). Probá de nuevo en un rato; si sigue "
-                "fallando, avisale a sistemas."
-            )
+            tsv = await _ejecutar_sql(sql)
+        except _FalloMagnus:
+            return _MSG_FALLO_MAGNUS
         filas = _parsear_tsv_ranking(tsv)
         if not filas:
             return f"No encontré facturación de ningún vendedor en {etiqueta}."
@@ -275,15 +306,9 @@ async def responder_ventas(mensaje: str, vendedor_codigo: int | None, es_admin: 
     sql = _sql_reporte_mensual(desde, hasta, vendedor_codigo)
 
     try:
-        tool = await _get_query_tool()
-        tsv = await tool.ainvoke({"sql": sql, "db": "EVERWEAR", "max_rows": 60})
-    except Exception:
-        log.exception("consulta de ventas a magnus falló")
-        return (
-            "No pude consultar la base de ventas ahora mismo (problema de "
-            "conexión con Magnus). Probá de nuevo en un rato; si sigue "
-            "fallando, avisale a sistemas."
-        )
+        tsv = await _ejecutar_sql(sql)
+    except _FalloMagnus:
+        return _MSG_FALLO_MAGNUS
 
     filas = _parsear_tsv(tsv)
     quien = "toda la empresa" if vendedor_codigo is None else f"tu cartera (vendedor {vendedor_codigo})"
