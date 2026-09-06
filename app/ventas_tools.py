@@ -156,6 +156,191 @@ ORDER BY Importe DESC
 """.strip()
 
 
+# ── Corte por línea de producto ───────────────────────────────────────────────
+# "qué vendedor vendió más en bulones" = el mismo ranking pero acotado a una
+# línea. Criterio idéntico al de /ventas/bulones (indicadores-api/bulones.py):
+# la línea NO está en el comprobante sino en el artículo, vía
+# StkFer_ArtParamet.Nivel1, y el nombre vive en Stk_Nivel1.Detalle (~82 filas).
+# Allá la línea está fija en 'BULON%'; acá se resuelve la que nombre el usuario
+# contra el catálogo, así sirve para cualquiera (mangueras, correas, etc.).
+#
+# OJO con la diferencia de criterio contra el ranking general: éste suma por
+# RENGLÓN de artículo (Cantidad * PrecioVenta con signo por
+# Ven_CodCom.DebitoCredito), no por cabecera, porque una línea solo existe a
+# nivel artículo. Eso deja afuera las NC por concepto (bonificaciones, ajustes:
+# no tienen artículo, viven en Ven_RenDebCre) — ~7% de la venta. Es correcto
+# para un corte por línea (una bonificación no pertenece a ninguna), pero
+# explica que el total por línea no cierre contra el ranking general.
+_TTL_LINEAS = 3600
+_lineas_cache: dict = {"t": 0.0, "datos": []}
+
+_STOP_LINEA = {
+    "linea", "lineas", "vendedor", "vendedores", "vendio", "vendieron",
+    "venta", "ventas", "mejor", "mejores", "ranking", "factura", "facturo",
+    "facturacion", "empresa", "cliente", "clientes", "cuanto", "cuanta",
+    "quien", "cual", "cuales", "este", "esta", "mes", "meses", "anio", "año",
+    "total", "totales", "mucho", "mas", "menos", "pasado", "actual", "curso",
+    "producto", "productos", "articulo", "articulos", "rubro", "sector",
+}
+
+
+def _normalizar(s: str) -> str:
+    """Minúsculas y sin acentos — el catálogo de Magnus escribe 'BULONERÍA'
+    con tilde (por eso /ventas/bulones matchea con LIKE 'BULON%'), y el usuario
+    escribe como se le ocurre."""
+    s = (s or "").lower()
+    for a, b in (("á", "a"), ("é", "e"), ("í", "i"), ("ó", "o"), ("ú", "u"),
+                 ("ü", "u"), ("ñ", "n")):
+        s = s.replace(a, b)
+    return s
+
+
+def _clave_linea(detalle: str) -> str:
+    """Primera palabra significativa del nombre de la línea — la que el usuario
+    va a nombrar. 'CORREAS EVER WEAR' → 'correas'; 'LÍNEA BUCO' → 'buco'
+    (salteando la palabra genérica)."""
+    for p in _normalizar(detalle).replace(".", " ").replace("/", " ").split():
+        if len(p) >= 4 and p not in _STOP_LINEA:
+            return p
+    return ""
+
+
+def _prefijo_comun(a: str, b: str) -> int:
+    n = 0
+    for x, y in zip(a, b):
+        if x != y:
+            break
+        n += 1
+    return n
+
+
+async def _catalogo_lineas() -> list[tuple[int, str]]:
+    """(Nivel1, Detalle) de Stk_Nivel1, cacheado 1h. Son ~82 filas y no cambian
+    casi nunca; sin cache pagaríamos una consulta extra por cada mensaje."""
+    import time
+
+    if _lineas_cache["datos"] and time.time() - _lineas_cache["t"] < _TTL_LINEAS:
+        return _lineas_cache["datos"]
+    tsv = await _ejecutar_sql(
+        "SELECT Nivel1, LTRIM(RTRIM(Detalle)) AS Detalle FROM Stk_Nivel1 ORDER BY 2"
+    )
+    datos = []
+    for l in (tsv or "").splitlines()[1:]:
+        if l.startswith("("):
+            break
+        partes = l.split("\t")
+        if len(partes) < 2:
+            continue
+        try:
+            datos.append((int(partes[0]), partes[1].strip()))
+        except ValueError:
+            continue
+    _lineas_cache.update({"t": time.time(), "datos": datos})
+    return datos
+
+
+def _detectar_lineas(mensaje: str, catalogo: list[tuple[int, str]]) -> list[tuple[str, list[int]]]:
+    """Líneas nombradas en el mensaje → [(etiqueta, [Nivel1, ...]), ...], en
+    orden de aparición. Determinístico (no LLM), misma razón que
+    _parsear_rango: si el modelo elige mal la línea, el número sale mal y nadie
+    lo nota.
+
+    Devuelve un GRUPO de códigos por palabra, no uno solo: el catálogo tiene 7
+    líneas de correas, 5 de filtros y 2 de mangueras (MANGUERAS y MANGUERAS
+    NACIONALES). Quien pregunta "cuánto vendimos de correas" las quiere todas
+    — es el mismo criterio de /ventas/bulones, que agrupa con LIKE 'BULON%' en
+    vez de fijar un código.
+
+    Match por prefijo común contra la primera palabra significativa del nombre,
+    así 'bulones' encuentra BULONERÍA sin mantener a mano una tabla de
+    sinónimos. Umbral: 5 caracteres (o la palabra entera si es más corta) y a
+    lo sumo 4 de diferencia con ella."""
+    tokens = [t for t in re.findall(r"[a-z]{4,}", _normalizar(mensaje)) if t not in _STOP_LINEA]
+    if not tokens:
+        return []
+    claves: dict[str, list[tuple[int, str]]] = {}
+    for nivel1, detalle in catalogo:
+        k = _clave_linea(detalle)
+        if k:
+            claves.setdefault(k, []).append((nivel1, detalle))
+
+    salida: list[tuple[str, list[int]]] = []
+    usadas: set[str] = set()
+    for tok in tokens:
+        mejor = None
+        for k in claves:
+            p = _prefijo_comun(tok, k)
+            if p >= min(5, len(k)) and p >= len(k) - 4:
+                if mejor is None or p > _prefijo_comun(tok, mejor):
+                    mejor = k
+        if not mejor or mejor in usadas:
+            continue
+        usadas.add(mejor)
+        grupo = claves[mejor]
+        etiqueta = grupo[0][1] if len(grupo) == 1 else f"{mejor.upper()} ({len(grupo)} líneas)"
+        salida.append((etiqueta, [n for n, _ in grupo]))
+    return salida[:3]
+
+
+_SQL_JOIN_LINEA = """
+FROM Ven_CompCabecera vc
+JOIN Ven_CodCom cc        ON cc.CompCodigo    = vc.CompCodigo
+JOIN Ven_CompRenglon r    ON r.NroMovVenta    = vc.NroMovVenta
+JOIN StkFer_Articulos s   ON s.CodArticulo    = r.CodArticu
+JOIN StkFer_ArtParamet ap ON ap.ArticuloPatron = s.ArticuloPatron
+"""
+
+# Signo por Ven_CodCom.DebitoCredito (1 débito suma, 2 crédito resta) — mismo
+# _MONTO que indicadores-api/bulones.py, para que los dos den lo mismo.
+_MONTO_RENGLON = (
+    "CASE cc.DebitoCredito WHEN 1 THEN (r.Cantidad * r.PrecioVenta) "
+    "ELSE (r.Cantidad * r.PrecioVenta) * -1 END"
+)
+
+
+def _in_niveles(niveles: list[int]) -> str:
+    """Los códigos salen del catálogo de Magnus, no del mensaje: son ints del
+    propio catálogo, así que no hay texto del usuario en el SQL."""
+    return ",".join(str(int(n)) for n in niveles)
+
+
+def _sql_ranking_vendedores_linea(desde: dt.date, hasta_exclusivo: dt.date, niveles: list[int]) -> str:
+    """Ranking entre vendedores acotado a una línea (solo admin, igual que
+    _sql_ranking_vendedores)."""
+    return f"""
+SELECT vc.Vendedor AS VendedorCodigo, v.VendedorNombre,
+  SUM({_MONTO_RENGLON}) AS Importe,
+  COUNT(DISTINCT vc.NroMovVenta) AS Comprobantes
+{_SQL_JOIN_LINEA.strip()}
+LEFT JOIN MAGNUS_SITD.dbo.Vendedores v ON v.VendedorCodigo = vc.Vendedor
+WHERE vc.FecMovim >= {_dias(desde)} AND vc.FecMovim < {_dias(hasta_exclusivo)}
+  AND ap.Nivel1 IN ({_in_niveles(niveles)})
+GROUP BY vc.Vendedor, v.VendedorNombre
+ORDER BY Importe DESC
+""".strip()
+
+
+def _sql_total_linea(
+    desde: dt.date, hasta_exclusivo: dt.date, niveles: list[int], vendedor_codigo: int | None
+) -> str:
+    """Total de UNA línea por mes — la versión de _sql_reporte_mensual acotada
+    a la línea, para "cómo vengo en bulones". Con vendedor_codigo filtra por
+    quién facturó el comprobante (mismo criterio que el resto de este módulo;
+    /ventas/bulones en cambio corta por cartera, así que pueden no coincidir)."""
+    filtro = f" AND vc.Vendedor = {int(vendedor_codigo)}" if vendedor_codigo is not None else ""
+    return f"""
+SELECT YEAR(DATEADD(DAY,vc.FecMovim,'1800-12-28')) AS Anio,
+  MONTH(DATEADD(DAY,vc.FecMovim,'1800-12-28')) AS Mes,
+  SUM({_MONTO_RENGLON}) AS Importe,
+  COUNT(DISTINCT vc.NroMovVenta) AS Comprobantes
+{_SQL_JOIN_LINEA.strip()}
+WHERE vc.FecMovim >= {_dias(desde)} AND vc.FecMovim < {_dias(hasta_exclusivo)}
+  AND ap.Nivel1 IN ({_in_niveles(niveles)}){filtro}
+GROUP BY YEAR(DATEADD(DAY,vc.FecMovim,'1800-12-28')), MONTH(DATEADD(DAY,vc.FecMovim,'1800-12-28'))
+ORDER BY 1,2
+""".strip()
+
+
 def _parsear_tsv_ranking(tsv: str) -> list[dict]:
     lineas = [l for l in (tsv or "").splitlines() if l.strip()]
     filas = []
@@ -288,6 +473,40 @@ async def _ejecutar_sql(sql: str) -> str:
         raise _FalloMagnus(str(e)) from e
 
 
+def _monto(x: float) -> str:
+    return f"${x:,.0f}".replace(",", ".")
+
+
+def _formatear_ranking(filas: list[dict], titulo: str, tope: int) -> str:
+    """Formateo en Python, no vía LLM (ver docstring del módulo): estos números
+    los usa alguien para decidir, no pueden salir redondeados de cualquier
+    manera."""
+    if not filas:
+        return f"{titulo}: no encontré facturación."
+    filas = [f for f in filas if f["importe"] != 0]
+    filas.sort(key=lambda f: f["importe"], reverse=True)
+    if not filas:
+        return f"{titulo}: no encontré facturación."
+    out = [f"{titulo}:", ""]
+    for i, f in enumerate(filas[:tope], start=1):
+        out.append(
+            f"{i}. {f['nombre']} (cód. {f['codigo']}): {_monto(f['importe'])} "
+            f"({f['comprobantes']} comp.)"
+        )
+    if len(filas) > tope:
+        out.append(f"… y {len(filas) - tope} vendedores más.")
+    return "\n".join(out)
+
+
+# Aclaración al pie de cualquier corte por línea: el número sale de los
+# renglones de artículo, así que no incluye las NC/bonificaciones por concepto
+# (no tienen artículo, ver el comentario de _MONTO_RENGLON). Sin esto, alguien
+# compara contra el ranking general o contra /ventas/bulones y no cierra.
+_PIE_LINEA = (
+    "(Por línea sumo los renglones de artículo, así que no entran las "
+    "bonificaciones ni las notas de crédito por concepto.)"
+)
+
 _MSG_FALLO_MAGNUS = (
     "No pude consultar la base de ventas ahora mismo (no responde el "
     "servicio de Magnus). Probá de nuevo en un rato; si sigue fallando, "
@@ -311,6 +530,17 @@ async def responder_ventas(mensaje: str, vendedor_codigo: int | None, es_admin: 
 
     desde, hasta, etiqueta = _parsear_rango(mensaje)
 
+    # ¿Nombró alguna línea de producto? (bulones, mangueras, …). Si el catálogo
+    # no se puede leer, se sigue sin corte por línea en vez de fallar: es mejor
+    # dar el número general que no dar nada.
+    lineas_pedidas: list[tuple[int, str]] = []
+    try:
+        lineas_pedidas = _detectar_lineas(mensaje, await _catalogo_lineas())
+    except _FalloMagnus:
+        return _MSG_FALLO_MAGNUS
+    except Exception:
+        log.exception("no pude leer el catálogo de líneas — sigo sin corte por línea")
+
     # Ranking ENTRE vendedores ("qué vendedor vendió más"): solo admin — ver
     # docstring del módulo. Un no-admin que lo pida no se queda sin respuesta:
     # se le aclara el motivo y se le ofrece su propio dato en su lugar.
@@ -319,26 +549,40 @@ async def responder_ventas(mensaje: str, vendedor_codigo: int | None, es_admin: 
             return (
                 "Ese dato es de toda la empresa y no te lo puedo mostrar — "
                 "solo puedo darte TU propia facturación. Preguntame, por "
-                f"ejemplo, \"cómo vengo en {etiqueta}\"."
+                f"ejemplo, \"cómo vengo {'' if etiqueta.split()[0] in ('este', 'el', 'hoy') else 'en '}{etiqueta}\"."
             )
-        sql = _sql_ranking_vendedores(desde, hasta)
+        # Acotado a una o varias líneas ("quién vendió más en bulones y en
+        # mangueras") — un ranking por cada una.
+        if lineas_pedidas:
+            bloques = []
+            tope = 10 if len(lineas_pedidas) == 1 else 5
+            for etiqueta_linea, niveles in lineas_pedidas:
+                try:
+                    tsv = await _ejecutar_sql(_sql_ranking_vendedores_linea(desde, hasta, niveles))
+                except _FalloMagnus:
+                    return _MSG_FALLO_MAGNUS
+                bloques.append(
+                    _formatear_ranking(
+                        _parsear_tsv_ranking(tsv), f"{etiqueta_linea} — {etiqueta}", tope
+                    )
+                )
+            bloques.append(_PIE_LINEA)
+            return "\n\n".join(bloques)
+
         try:
-            tsv = await _ejecutar_sql(sql)
+            tsv = await _ejecutar_sql(_sql_ranking_vendedores(desde, hasta))
         except _FalloMagnus:
             return _MSG_FALLO_MAGNUS
-        filas = _parsear_tsv_ranking(tsv)
-        if not filas:
-            return f"No encontré facturación de ningún vendedor en {etiqueta}."
-        filas.sort(key=lambda f: f["importe"], reverse=True)
-        lineas = [f"Ranking de vendedores, {etiqueta}:", ""]
-        for i, f in enumerate(filas[:15], start=1):
-            monto = f"${f['importe']:,.0f}".replace(",", ".")
-            lineas.append(f"{i}. {f['nombre']} (cód. {f['codigo']}): {monto} ({f['comprobantes']} comp.)")
-        if len(filas) > 15:
-            lineas.append(f"… y {len(filas) - 15} vendedores más.")
-        return "\n".join(lineas)
+        return _formatear_ranking(_parsear_tsv_ranking(tsv), f"Ranking de vendedores, {etiqueta}", 15)
 
-    sql = _sql_reporte_mensual(desde, hasta, vendedor_codigo)
+    if lineas_pedidas:
+        # "cómo vengo en bulones": mismo reporte mensual pero por línea. El
+        # gate de vendedor es el de siempre (vendedor_codigo ya viene fijo).
+        detalle, niveles = lineas_pedidas[0]
+        sql = _sql_total_linea(desde, hasta, niveles, vendedor_codigo)
+    else:
+        detalle = None
+        sql = _sql_reporte_mensual(desde, hasta, vendedor_codigo)
 
     try:
         tsv = await _ejecutar_sql(sql)
@@ -347,26 +591,30 @@ async def responder_ventas(mensaje: str, vendedor_codigo: int | None, es_admin: 
 
     filas = _parsear_tsv(tsv)
     quien = "toda la empresa" if vendedor_codigo is None else f"tu cartera (vendedor {vendedor_codigo})"
+    if detalle:
+        quien = f"{quien}, línea {detalle}"
     if not filas:
         return f"No encontré facturación de {quien} en {etiqueta}."
 
     total = sum(f["importe"] for f in filas)
     comprobantes = sum(f["comprobantes"] for f in filas)
+    pie = f"\n\n{_PIE_LINEA}" if detalle else ""
 
     if len(filas) == 1:
         f = filas[0]
         return (
-            f"Facturación de {quien} en {etiqueta}: "
-            f"${f['importe']:,.0f}".replace(",", ".") + f" ({f['comprobantes']} comprobantes)."
+            f"Facturación de {quien} en {etiqueta}: {_monto(f['importe'])} "
+            f"({f['comprobantes']} comprobantes).{pie}"
         )
 
     lineas = [f"Facturación de {quien}, {etiqueta}:", ""]
     for f in filas:
-        monto = f"${f['importe']:,.0f}".replace(",", ".")
-        lineas.append(f"- {_NOMBRE_MES[f['mes']]} {f['anio']}: {monto} ({f['comprobantes']} comp.)")
+        lineas.append(
+            f"- {_NOMBRE_MES[f['mes']]} {f['anio']}: {_monto(f['importe'])} "
+            f"({f['comprobantes']} comp.)"
+        )
     mejor = max(filas, key=lambda f: f["importe"])
-    total_fmt = f"${total:,.0f}".replace(",", ".")
     lineas.append("")
-    lineas.append(f"Total del período: {total_fmt} ({comprobantes} comprobantes).")
-    lineas.append(f"Mejor mes: {_NOMBRE_MES[mejor['mes']]} {mejor['anio']} con ${mejor['importe']:,.0f}".replace(",", ".") + ".")
-    return "\n".join(lineas)
+    lineas.append(f"Total del período: {_monto(total)} ({comprobantes} comprobantes).")
+    lineas.append(f"Mejor mes: {_NOMBRE_MES[mejor['mes']]} {mejor['anio']} con {_monto(mejor['importe'])}.")
+    return "\n".join(lineas) + pie
