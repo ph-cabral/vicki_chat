@@ -30,8 +30,10 @@ TRES GATES, en este orden (ver `responder_ventas`):
      cliente existe pero no es de su cartera, se le dice que no le corresponde
      — nunca se devuelve un número.
   2. VENDEDOR MENCIONADO — si el mensaje nombra a otro vendedor (por nombre
-     del maestro `Vendedores` o por "vendedor 797"), un no-admin recibe la
-     negativa; un admin usa ese código como filtro.
+     del maestro `Vendedores`, por un nombre de pila inconfundible o por
+     "vendedor 797"), un no-admin recibe la negativa; un admin usa ese código
+     como filtro. Se combina con el corte por línea: "ubaldo vendió bulones?"
+     es vendedor + línea en la misma pregunta.
   3. LO PROPIO — sin cliente ni vendedor nombrado, sigue el camino de siempre:
      su facturación, filtrada por el código que llegó de la sesión.
 
@@ -199,6 +201,7 @@ _STOP_LINEA = {
     "quien", "cual", "cuales", "este", "esta", "mes", "meses", "anio", "año",
     "total", "totales", "mucho", "mas", "menos", "pasado", "actual", "curso",
     "producto", "productos", "articulo", "articulos", "rubro", "sector",
+    "vendido", "vendidos", "vendida", "vendidas", "vendimos",
 }
 
 
@@ -495,6 +498,12 @@ def _monto(x: float) -> str:
     return f"${x:,.0f}".replace(",", ".")
 
 
+def _comps(n: int) -> str:
+    """"1 comprobante", no "1 comprobantes" — el corte por línea da muchos
+    totales de un solo comprobante y quedaba mal escrito."""
+    return f"{n} comprobante" if n == 1 else f"{n} comprobantes"
+
+
 def _formatear_ranking(filas: list[dict], titulo: str, tope: int, sustantivo: str = "vendedores") -> str:
     """Formateo en Python, no vía LLM (ver docstring del módulo): estos números
     los usa alguien para decidir, no pueden salir redondeados de cualquier
@@ -538,10 +547,24 @@ _STOP_VENDEDOR = {
     "mostrador", "mostradores", "sin", "cero", "baja", "gerencia", "coop",
     "cooperativa", "comercio", "exterior", "empresa", "mercado", "libre",
     "atendidos", "por", "los", "las", "del", "san", "santa",
+    # agrupadores del maestro que NO son personas: "VENDEDOR CLIENTES
+    # INDUSTRIAS", "VENDEDOR AGROACTIVA 2026", "MANFREY COOP.DE TAMB.LTDA."
+    "cliente", "clientes", "industrias", "agro", "agroact", "agroactiva",
+    "expo", "comercial", "ltda", "tamb",
 }
 
 _PATRON_VENDEDOR_CODIGO = re.compile(
     r"\bvendedor(?:a)?\s*(?:codigo|cod\.?|nro\.?|n[°º]|numero)?\s*(\d{2,6})\b", re.I
+)
+
+# Marcas de razón social: si aparecen, el mensaje está hablando de una EMPRESA,
+# no de una persona, y una sola parte del nombre no alcanza para disparar el
+# gate (evita que "ferretería BLANCO" se lea como el vendedor Blanco, 797).
+_PATRON_RAZON_SOCIAL = re.compile(
+    r"\b(s\.?r\.?l|srl|s\.?a\.?s|sas|s\.?a|sa|ltda|hnos|hermanos|coop|"
+    r"cooperativa|ferreteria|distribuidora|agropecuaria|agricola|talleres|"
+    r"transportes|establecimiento|firma)\b",
+    re.I,
 )
 
 
@@ -571,18 +594,49 @@ async def _catalogo_vendedores() -> list[tuple[int, str]]:
     return datos
 
 
+def _partes_nombre(nombre: str) -> list[str]:
+    return [
+        p for p in re.findall(r"[a-z]{3,}", _normalizar(nombre))
+        if p not in _STOP_VENDEDOR
+    ]
+
+
+def _partes_unicas(catalogo: list[tuple[int, str]]) -> set[str]:
+    """Partes de nombre que aparecen en UN SOLO vendedor del maestro.
+
+    Es lo que permite reconocer a alguien nombrado con una sola palabra sin
+    mantener una lista de apodos: "ubaldo" identifica al 799 porque no hay otro
+    UBALDO; "romero" no identifica a nadie porque hay dos (677 y 796) y ahí sí
+    hacen falta dos partes."""
+    cuenta: dict[str, int] = {}
+    for _, nombre in catalogo:
+        for p in set(_partes_nombre(nombre)):
+            cuenta[p] = cuenta.get(p, 0) + 1
+    return {p for p, n in cuenta.items() if n == 1}
+
+
 def _detectar_vendedor_mencionado(
     mensaje: str, catalogo: list[tuple[int, str]]
 ) -> tuple[int, str] | None:
     """(codigo, nombre) del vendedor nombrado en el mensaje, o None.
 
-    Dos formas de nombrarlo:
+    Formas de nombrarlo:
       · explícita — "vendedor 797" / "el vendedor código 800".
-      · por nombre — se exigen DOS partes del nombre del maestro ("BLANCO
-        JULIO" ← "cuánto vendió Julio Blanco"), o UNA sola si además aparece
-        la palabra "vendedor". Con una parte suelta y sin la palabra
-        alcanzaría un apellido común dentro de una razón social para negar de
-        más; con dos, el falso positivo es muy improbable.
+      · dos partes del nombre del maestro — "BLANCO JULIO" ← "cuánto vendió
+        Julio Blanco".
+      · UNA parte inconfundible — "ubaldo vendió bulones?". Alcanza una sola
+        palabra si es de 5+ letras y aparece en un único vendedor del maestro
+        (`_partes_unicas`). Antes se exigían siempre dos y por eso "ubaldo
+        vendió bulonería?" no aplicaba ningún filtro: caía al reporte propio y
+        un admin recibía el total de TODA la empresa como si fuera de él.
+      · UNA parte + la palabra "vendedor", para los nombres de una sola palabra.
+
+    El riesgo de la parte suelta es al revés (negar de más, no mostrar de más):
+    un apellido dentro de una razón social podría leerse como el vendedor. Se
+    acota de dos maneras — la unicidad en el maestro, y `_PATRON_RAZON_SOCIAL`,
+    que si detecta que se habla de una empresa vuelve a exigir dos partes. Y el
+    gate de cliente corre ANTES que éste, así que "cliente Ferretería Blanco"
+    ni llega acá.
     """
     m = _normalizar(mensaje)
     por_codigo = _PATRON_VENDEDOR_CODIGO.search(mensaje or "")
@@ -595,18 +649,35 @@ def _detectar_vendedor_mencionado(
     if not tokens:
         return None
     dice_vendedor = bool(re.search(r"\bvendedor(a|es)?\b", m))
+    habla_de_empresa = bool(_PATRON_RAZON_SOCIAL.search(m))
+    unicas = _partes_unicas(catalogo)
+
     mejor: tuple[int, int, str] | None = None  # (partes_encontradas, codigo, nombre)
     for codigo, nombre in catalogo:
-        partes = [
-            p for p in re.findall(r"[a-z]{3,}", _normalizar(nombre))
-            if p not in _STOP_VENDEDOR
-        ]
+        partes = _partes_nombre(nombre)
         if not partes:
             continue
-        encontradas = sum(1 for p in partes if p in tokens)
-        if encontradas >= 2 or (encontradas >= 1 and dice_vendedor and len(partes) == 1):
-            if mejor is None or encontradas > mejor[0]:
-                mejor = (encontradas, codigo, nombre)
+        encontradas = [p for p in partes if p in tokens]
+        if not encontradas:
+            continue
+        if len(encontradas) >= 2:
+            alcanza = True
+        else:
+            p = encontradas[0]
+            # `len(partes) >= 2` = el registro parece una PERSONA. Sin esto,
+            # "VIAJANTE ZONA ROSARIO" (791) queda reducido a "rosario" y
+            # cualquiera que escriba "mi zona de rosario" se comería la
+            # negativa del gate. Los agrupadores de una sola palabra solo
+            # matchean si además se dice "vendedor".
+            alcanza = (
+                (len(partes) >= 2 and len(p) >= 5 and p in unicas
+                 and (dice_vendedor or not habla_de_empresa))
+                or (dice_vendedor and len(partes) == 1)
+            )
+        # Se prefiere el match de más partes: si el mensaje dice "Julio Blanco",
+        # gana el 797 (dos partes) sobre cualquier coincidencia de una sola.
+        if alcanza and (mejor is None or len(encontradas) > mejor[0]):
+            mejor = (len(encontradas), codigo, nombre)
     return (mejor[1], mejor[2]) if mejor else None
 
 
@@ -963,7 +1034,7 @@ async def _responder_cliente(
         f = filas[0]
         return (
             f"Facturación de {quien} en {etiqueta}{de_quien}: {_monto(f['importe'])} "
-            f"({f['comprobantes']} comprobantes).{pie}"
+            f"({_comps(f['comprobantes'])}).{pie}"
         )
 
     out = [f"Facturación de {quien}, {etiqueta}{de_quien}:", ""]
@@ -973,7 +1044,7 @@ async def _responder_cliente(
             f"({f['comprobantes']} comp.)"
         )
     out.append("")
-    out.append(f"Total del período: {_monto(total)} ({comprobantes} comprobantes).")
+    out.append(f"Total del período: {_monto(total)} ({_comps(comprobantes)}).")
     return "\n".join(out) + pie
 
 
@@ -1135,7 +1206,7 @@ async def responder_ventas(mensaje: str, vendedor_codigo: int | None, es_admin: 
         f = filas[0]
         return (
             f"Facturación de {quien} en {etiqueta}: {_monto(f['importe'])} "
-            f"({f['comprobantes']} comprobantes).{pie}"
+            f"({_comps(f['comprobantes'])}).{pie}"
         )
 
     lineas = [f"Facturación de {quien}, {etiqueta}:", ""]
@@ -1146,6 +1217,6 @@ async def responder_ventas(mensaje: str, vendedor_codigo: int | None, es_admin: 
         )
     mejor = max(filas, key=lambda f: f["importe"])
     lineas.append("")
-    lineas.append(f"Total del período: {_monto(total)} ({comprobantes} comprobantes).")
+    lineas.append(f"Total del período: {_monto(total)} ({_comps(comprobantes)}).")
     lineas.append(f"Mejor mes: {_NOMBRE_MES[mejor['mes']]} {mejor['anio']} con {_monto(mejor['importe'])}.")
     return "\n".join(lineas) + pie

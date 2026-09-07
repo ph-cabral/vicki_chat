@@ -1,18 +1,31 @@
-"""Verificación de los gates de ventas_tools (sin tocar Magnus)."""
-import sys, types, asyncio, datetime as dt
+"""Verificación de los gates de ventas_tools (sin tocar Magnus).
+
+Correr desde cualquier lado: `python vicki_chat/test_gates_ventas.py`. Las
+rutas salen de __file__ — antes estaban hardcodeadas a una sesión vieja y el
+archivo no corría en otra máquina.
+"""
+import os, sys, types, asyncio, datetime as dt
+
+_AQUI = os.path.dirname(os.path.abspath(__file__))
 
 # stub de app.config para importar el módulo suelto
-app = types.ModuleType("app"); app.__path__ = ["/sessions/confident-practical-goodall/mnt/vicki/vicki_chat/app"]
+app = types.ModuleType("app"); app.__path__ = [os.path.join(_AQUI, "app")]
 cfg = types.ModuleType("app.config")
 cfg.config = types.SimpleNamespace(
     MAGNUS_SQL_URL="http://x/sql", MAGNUS_MCP_URL="", MAGNUS_API_TOKEN="",
     MAGNUS_MCP_TIMEOUT=20)
 sys.modules["app"] = app; sys.modules["app.config"] = cfg
-sys.path.insert(0, "/sessions/confident-practical-goodall/mnt/vicki/vicki_chat")
+sys.path.insert(0, _AQUI)
 import app.ventas_tools as vt
 
+# Espeja la forma del maestro real: personas con 2+ partes, agrupadores de una
+# sola palabra significativa, y un apellido repetido (ROMERO) que por eso NO
+# alcanza suelto.
 VEND = [(797, "BLANCO JULIO"), (800, "PEREZ MARIA"), (9000, "MOSTRADORES"),
-        (814, "GOMEZ CARLOS"), (18200, "ZONA CBA")]
+        (814, "GOMEZ CARLOS"), (18200, "ZONA CBA"),
+        (799, "UBALDO ANTONIO PALENCIA ANGULO"),
+        (791, "VIAJANTE ZONA ROSARIO"),
+        (677, "ROMERO ESTEBAN CESAR"), (796, "ROMERO RANDOLFO")]
 
 ok = fail = 0
 def check(nombre, got, want):
@@ -30,8 +43,18 @@ casos_v = [
     ("cuanto vendi de bulones el mes pasado", None),
     ("ranking de vendedores de septiembre", None),
     ("cuanto vendio maria perez", (800, "PEREZ MARIA")),
-    ("ventas de gomez", None),                      # 1 token suelto, sin "vendedor"
     ("ventas del vendedor gomez carlos", (814, "GOMEZ CARLOS")),
+    # parte suelta e inconfundible: el caso que antes no filtraba nada
+    ("ubaldo ha vendido articulos de la linea buloneria?", (799, "UBALDO ANTONIO PALENCIA ANGULO")),
+    ("ventas de gomez", (814, "GOMEZ CARLOS")),
+    # apellido repetido en el maestro (677 y 796): suelto no identifica a nadie
+    ("cuanto vendio romero", None),
+    ("cuanto vendio romero randolfo", (796, "ROMERO RANDOLFO")),
+    # razón social: vuelve a exigir dos partes, no se lee como el vendedor
+    ("ventas de ferreteria gomez srl", None),
+    # agrupador de una sola palabra: no se dispara con la palabra suelta
+    ("como vienen mis ventas de la zona rosario", None),
+    ("cuanto vendio el vendedor rosario", (791, "VIAJANTE ZONA ROSARIO")),
 ]
 for msg, want in casos_v:
     check(msg, vt._detectar_vendedor_mencionado(msg, VEND), want)
@@ -112,6 +135,23 @@ async def main():
     m.sqls.clear()
     r = await vt.responder_ventas("ranking de vendedores de agosto", 800, False)
     check("ranking sigue vedado al no-admin", "no te lo puedo mostrar" in r, True)
+
+    # vendedor + línea en la misma pregunta (el caso que devolvía el total de
+    # toda la empresa como si fuera de la persona nombrada)
+    m.sqls.clear()
+    r = await vt.responder_ventas("ubaldo ha vendido articulos de buloneria?", None, True)
+    check("admin: vendedor + línea", "UBALDO ANTONIO PALENCIA ANGULO (cód. 799)" in r, True)
+    check("etiqueta con la línea", "línea BULONERÍA" in r, True)
+    check("no dice toda la empresa", "toda la empresa" in r, False)
+    check("SQL filtró por 799 y por Nivel1",
+          any("vc.Vendedor = 799" in s and "ap.Nivel1 IN (1)" in s for s in m.sqls), True)
+
+    m.sqls.clear()
+    r = await vt.responder_ventas("ubaldo ha vendido buloneria?", 800, False)
+    check("no-admin no puede preguntar por ubaldo", r, vt._MSG_OTRO_VENDEDOR)
+
+    check("singular de comprobante", vt._comps(1), "1 comprobante")
+    check("plural de comprobante", vt._comps(2), "2 comprobantes")
 
 asyncio.run(main())
 print(f"\n{ok} ok, {fail} fail")
