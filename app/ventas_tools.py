@@ -20,6 +20,24 @@ DISEÑO DE SEGURIDAD (leer antes de tocar este archivo):
   Un admin (isAdmin=True, ver ventas_vendedor_codigo=None) consulta TODA la
   empresa sin filtro — eso lo decide vicki_web, acá solo se respeta lo que
   llega.
+
+TRES GATES, en este orden (ver `responder_ventas`):
+
+  1. CLIENTE — si el mensaje nombra un cliente, se lo busca SIEMPRE dentro de
+     la cartera del vendedor logueado (criterio de
+     vicki_web/indicadores-api/cartera.py: zona ∪ facturado en los últimos 24
+     meses, único lugar donde se define "de quién es un cliente"). Si el
+     cliente existe pero no es de su cartera, se le dice que no le corresponde
+     — nunca se devuelve un número.
+  2. VENDEDOR MENCIONADO — si el mensaje nombra a otro vendedor (por nombre
+     del maestro `Vendedores` o por "vendedor 797"), un no-admin recibe la
+     negativa; un admin usa ese código como filtro.
+  3. LO PROPIO — sin cliente ni vendedor nombrado, sigue el camino de siempre:
+     su facturación, filtrada por el código que llegó de la sesión.
+
+  Todos los filtros se arman con ints (código de vendedor, código de cliente,
+  Nivel1 del catálogo). El ÚNICO texto del usuario que entra al SQL es el
+  término de búsqueda de cliente, saneado por `_literal_like`.
 """
 import asyncio
 import datetime as dt
@@ -477,7 +495,7 @@ def _monto(x: float) -> str:
     return f"${x:,.0f}".replace(",", ".")
 
 
-def _formatear_ranking(filas: list[dict], titulo: str, tope: int) -> str:
+def _formatear_ranking(filas: list[dict], titulo: str, tope: int, sustantivo: str = "vendedores") -> str:
     """Formateo en Python, no vía LLM (ver docstring del módulo): estos números
     los usa alguien para decidir, no pueden salir redondeados de cualquier
     manera."""
@@ -494,8 +512,365 @@ def _formatear_ranking(filas: list[dict], titulo: str, tope: int) -> str:
             f"({f['comprobantes']} comp.)"
         )
     if len(filas) > tope:
-        out.append(f"… y {len(filas) - tope} vendedores más.")
+        out.append(f"… y {len(filas) - tope} {sustantivo} más.")
     return "\n".join(out)
+
+
+# ── Gate 2: ¿el mensaje nombra a OTRO vendedor? ───────────────────────────────
+# "cuánto vendió Juan Blanco en agosto" no es un ranking (no matchea
+# _PATRON_RANKING) y hasta ahora caía al reporte propio: le devolvía SUS
+# números diciendo "tu cartera". No filtraba nada, pero el usuario podía leer
+# ese total como si fuera el de Juan. Ahora se detecta el nombre y se corta.
+#
+# Determinístico contra el maestro `Vendedores` (el mismo de cartera.py, NO
+# `Ped_Usu_Arma` — ver memoria 'magnus-codigos-vendedor'). No se le pregunta al
+# LLM: si el modelo "no ve" el nombre, el gate no se aplica y se filtra de más;
+# acá el peor caso tiene que ser negar, no mostrar.
+_TTL_VENDEDORES = 3600
+_vendedores_cache: dict = {"t": 0.0, "datos": []}
+
+# Palabras del maestro que no identifican a una persona (canales, zonas y
+# agrupadores: MOSTRADORES, ZONA CBA, VIAJANTE ZONA ROSARIO…). Mismo criterio
+# que _es_persona() en indicadores-api/ventas.py. Se sacan del match para que
+# "zona" o "vendedor" en el mensaje no dispare el gate contra cualquiera.
+_STOP_VENDEDOR = {
+    "vendedor", "vendedora", "vendedores", "zona", "zonas", "viajante",
+    "mostrador", "mostradores", "sin", "cero", "baja", "gerencia", "coop",
+    "cooperativa", "comercio", "exterior", "empresa", "mercado", "libre",
+    "atendidos", "por", "los", "las", "del", "san", "santa",
+}
+
+_PATRON_VENDEDOR_CODIGO = re.compile(
+    r"\bvendedor(?:a)?\s*(?:codigo|cod\.?|nro\.?|n[°º]|numero)?\s*(\d{2,6})\b", re.I
+)
+
+
+async def _catalogo_vendedores() -> list[tuple[int, str]]:
+    """(VendedorCodigo, VendedorNombre) del maestro, cacheado 1h. Son ~40
+    filas y cambian con altas/bajas, nunca dentro de una charla."""
+    import time
+
+    if _vendedores_cache["datos"] and time.time() - _vendedores_cache["t"] < _TTL_VENDEDORES:
+        return _vendedores_cache["datos"]
+    tsv = await _ejecutar_sql(
+        "SELECT VendedorCodigo, LTRIM(RTRIM(VendedorNombre)) AS nombre "
+        "FROM MAGNUS_SITD.dbo.Vendedores ORDER BY 1"
+    )
+    datos = []
+    for l in (tsv or "").splitlines()[1:]:
+        if l.startswith("("):
+            break
+        partes = l.split("\t")
+        if len(partes) < 2:
+            continue
+        try:
+            datos.append((int(partes[0]), partes[1].strip()))
+        except ValueError:
+            continue
+    _vendedores_cache.update({"t": time.time(), "datos": datos})
+    return datos
+
+
+def _detectar_vendedor_mencionado(
+    mensaje: str, catalogo: list[tuple[int, str]]
+) -> tuple[int, str] | None:
+    """(codigo, nombre) del vendedor nombrado en el mensaje, o None.
+
+    Dos formas de nombrarlo:
+      · explícita — "vendedor 797" / "el vendedor código 800".
+      · por nombre — se exigen DOS partes del nombre del maestro ("BLANCO
+        JULIO" ← "cuánto vendió Julio Blanco"), o UNA sola si además aparece
+        la palabra "vendedor". Con una parte suelta y sin la palabra
+        alcanzaría un apellido común dentro de una razón social para negar de
+        más; con dos, el falso positivo es muy improbable.
+    """
+    m = _normalizar(mensaje)
+    por_codigo = _PATRON_VENDEDOR_CODIGO.search(mensaje or "")
+    if por_codigo:
+        cod = int(por_codigo.group(1))
+        nombre = next((n for c, n in catalogo if c == cod), f"vendedor {cod}")
+        return cod, nombre
+
+    tokens = set(re.findall(r"[a-z]{3,}", m))
+    if not tokens:
+        return None
+    dice_vendedor = bool(re.search(r"\bvendedor(a|es)?\b", m))
+    mejor: tuple[int, int, str] | None = None  # (partes_encontradas, codigo, nombre)
+    for codigo, nombre in catalogo:
+        partes = [
+            p for p in re.findall(r"[a-z]{3,}", _normalizar(nombre))
+            if p not in _STOP_VENDEDOR
+        ]
+        if not partes:
+            continue
+        encontradas = sum(1 for p in partes if p in tokens)
+        if encontradas >= 2 or (encontradas >= 1 and dice_vendedor and len(partes) == 1):
+            if mejor is None or encontradas > mejor[0]:
+                mejor = (encontradas, codigo, nombre)
+    return (mejor[1], mejor[2]) if mejor else None
+
+
+# ── Gate 1: clientes, siempre dentro de la cartera ────────────────────────────
+# El criterio de "qué clientes son de un vendedor" NO se reinventa acá: es el
+# de vicki_web/indicadores-api/cartera.py — zona (Clientes.Clasif_VendZona →
+# Vendedor_Zona → Vendedores) UNIÓN historial (facturado por ese vendedor en
+# los últimos CARTERA_MESES meses). Hacen falta los dos: hay vendedores activos
+# sin zona cargada (Julio Blanco, 797) que con criterio de zona no verían
+# ningún cliente, y clientes recién asignados que todavía no compraron.
+#
+# Si algún día cambia el criterio allá, cambiarlo TAMBIÉN acá: son dos procesos
+# distintos (Next.js/pyodbc vs. este) y no comparten módulo.
+CARTERA_MESES = 24
+
+_DIA_CORTE_CARTERA = (
+    f"DATEDIFF(day, '1800-12-28', DATEADD(month, -{CARTERA_MESES}, GETDATE()))"
+)
+
+
+def _sql_cartera(vendedor_codigo: int) -> str:
+    """Subconsulta con los CodCliente de la cartera de UN vendedor."""
+    v = int(vendedor_codigo)
+    return f"""
+SELECT c2.CodCliente
+FROM MAGNUS_SITD.dbo.Clientes c2
+JOIN MAGNUS_SITD.dbo.Vendedor_Zona vz ON vz.Clasif_VendZona = c2.Clasif_VendZona
+JOIN MAGNUS_SITD.dbo.Vendedores v
+  ON LTRIM(RTRIM(v.VendedorNombre)) = LTRIM(RTRIM(vz.Vendedor))
+WHERE v.VendedorCodigo = {v}
+UNION
+SELECT DISTINCT vch.CodCliente
+FROM Ven_CompCabecera vch
+WHERE vch.vendedor = {v} AND vch.FecMovim >= {_DIA_CORTE_CARTERA}
+""".strip()
+
+
+_PATRON_CLIENTE = re.compile(r"\bclientes?\b", re.I)
+_PATRON_CLIENTE_CODIGO = re.compile(
+    r"\bclientes?\s*(?:nro\.?|n[°º]|numero|codigo|cod\.?)?\s*(\d{2,8})\b", re.I
+)
+_PATRON_RANKING_CLIENTES = re.compile(
+    r"qu[ée] cliente|cu[áa]l cliente|mejor(es)? cliente|ranking de cliente|"
+    r"top de? cliente|clientes.{0,15}(m[áa]s|ranking)|mis clientes",
+    re.I,
+)
+
+# Relleno de una pregunta hablada: no aportan al nombre del cliente.
+_STOP_CLIENTE = _STOP_LINEA | {
+    "vendi", "vendio", "vendieron", "vendimos", "compro", "compra", "compras",
+    "compraron", "facture", "facturamos", "facturado", "cuanto", "cuanta",
+    "cuantos", "muestrame", "mostrame", "dame", "decime", "traeme", "quiero",
+    "saber", "ver", "por", "para", "con", "los", "las", "del", "una", "uno",
+    "que", "mis", "sus", "tus", "nos", "ese", "esa", "esos", "esas", "hoy",
+    "ultimo", "ultima", "ultimos", "periodo", "desde", "hasta", "entre",
+}
+
+
+def _literal_like(s: str, max_len: int = 40) -> str:
+    """Único punto donde texto del usuario entra al SQL (el término de
+    búsqueda del cliente).
+
+    Lista blanca, no lista negra: sobreviven letras, dígitos y espacio, todo
+    lo demás pasa a ser un espacio. Sin comilla no se puede cerrar el literal;
+    sin guion ni barra no se puede abrir un comentario (`--`, `/*`). Encima el
+    server de magnus solo acepta SELECT/WITH (mcp-magnus/server.py `_check`).
+
+    OJO: la comilla se DESCARTA, no se escapa — "D'Agostino" busca como
+    "D Agostino". Con los LIKE en AND de `_where_like_cliente` eso igual
+    matchea, y el tokenizador de `_detectar_cliente_pedido` ya parte por la
+    comilla antes de llegar acá, así que en la práctica no cambia nada. El
+    .replace() de abajo queda como segunda barrera por si algún día se
+    ensancha la lista blanca."""
+    limpio = re.sub(r"[^0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ ]", " ", s or "")
+    limpio = re.sub(r"\s+", " ", limpio).strip()[:max_len]
+    return limpio.replace("'", "''")
+
+
+def _detectar_cliente_pedido(mensaje: str) -> list[str] | None:
+    """Tokens con los que buscar al cliente nombrado, o None si el mensaje no
+    habla de un cliente puntual.
+
+    Determinístico igual que el resto del módulo, pero acá la exactitud no es
+    crítica para la seguridad: cualquier término que salga de esto se busca
+    SIEMPRE dentro de la cartera (`_buscar_cliente_en_cartera`), así que un
+    término mal extraído puede no encontrar al cliente — nunca encontrar uno
+    ajeno."""
+    if not _PATRON_CLIENTE.search(mensaje or ""):
+        return None
+    if _PATRON_RANKING_CLIENTES.search(mensaje or ""):
+        return None  # "mis mejores clientes" → ranking, no un cliente puntual
+
+    # 1) código explícito: "cliente 12345"
+    cod = _PATRON_CLIENTE_CODIGO.search(mensaje)
+    if cod:
+        return [cod.group(1)]
+
+    # 2) nombre entrecomillado: cliente "Ferretería del Centro"
+    entre_comillas = re.search(r"[\"“”']([^\"“”']{2,60})[\"“”']", mensaje)
+    cola = entre_comillas.group(1) if entre_comillas else re.split(
+        r"\bclientes?\b", mensaje, maxsplit=1, flags=re.I
+    )[-1]
+
+    # 3) las palabras significativas que siguen a "cliente". Se buscan como
+    # LIKE separados y en AND, no como una frase: "Ferretería del Centro" y
+    # "FERRETERIA CENTRO SRL" tienen que matchear igual.
+    tokens = []
+    for t in re.findall(r"[0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ&]{3,}", cola):
+        if _normalizar(t) in _STOP_CLIENTE or _normalizar(t) in MESES:
+            continue
+        tokens.append(t)
+        if len(tokens) == 3:
+            break
+    return tokens or None
+
+
+def _where_like_cliente(tokens: list[str]) -> str:
+    """Cada token, un LIKE en AND. Si el token es todo dígitos también se
+    prueba contra el código, que es como la gente nombra a un cliente
+    ("el 4521")."""
+    condiciones = []
+    for t in tokens:
+        lit = _literal_like(t)
+        if not lit:
+            continue
+        if lit.isdigit():
+            condiciones.append(
+                f"(c.Cliente_Nombre LIKE '%{lit}%' "
+                f"OR CAST(c.CodCliente AS varchar(20)) = '{lit}')"
+            )
+        else:
+            condiciones.append(f"c.Cliente_Nombre LIKE '%{lit}%'")
+    return " AND ".join(condiciones)
+
+
+def _sql_buscar_cliente(tokens: list[str], vendedor_codigo: int | None) -> str:
+    """Clientes que matchean, ACOTADOS a la cartera si hay vendedor (un admin
+    va sin filtro). El JOIN contra la cartera va en el mismo SELECT: nunca se
+    trae un cliente ajeno a memoria para descartarlo después."""
+    where = _where_like_cliente(tokens)
+    join = (
+        f"JOIN ({_sql_cartera(vendedor_codigo)}) cart ON cart.CodCliente = c.CodCliente"
+        if vendedor_codigo is not None else ""
+    )
+    return f"""
+SELECT TOP 5 c.CodCliente, LTRIM(RTRIM(c.Cliente_Nombre)) AS Nombre
+FROM MAGNUS_SITD.dbo.Clientes c
+{join}
+WHERE {where}
+ORDER BY c.Cliente_Nombre
+""".strip()
+
+
+def _sql_existe_cliente(tokens: list[str]) -> str:
+    """Sin filtro de cartera y solo para distinguir dos negativas MUY
+    distintas: "ese cliente no es tuyo" vs. "no existe / lo escribiste
+    distinto". Devuelve nada más que el nombre — nunca importes."""
+    return f"""
+SELECT TOP 3 LTRIM(RTRIM(c.Cliente_Nombre)) AS Nombre
+FROM MAGNUS_SITD.dbo.Clientes c
+WHERE {_where_like_cliente(tokens)}
+ORDER BY c.Cliente_Nombre
+""".strip()
+
+
+def _parsear_tsv_clientes(tsv: str) -> list[tuple[int, str]]:
+    filas = []
+    for l in (tsv or "").splitlines()[1:]:
+        if l.startswith("("):
+            break
+        partes = l.split("\t")
+        if len(partes) < 2:
+            continue
+        try:
+            filas.append((int(partes[0]), partes[1].strip()))
+        except ValueError:
+            continue
+    return filas
+
+
+def _parsear_tsv_nombres(tsv: str) -> list[str]:
+    out = []
+    for l in (tsv or "").splitlines()[1:]:
+        if l.startswith("("):
+            break
+        if l.strip():
+            out.append(l.split("\t")[0].strip())
+    return out
+
+
+def _sql_facturacion_cliente(
+    desde: dt.date, hasta_exclusivo: dt.date, cod_cliente: int,
+    vendedor_codigo: int | None, niveles: list[int] | None = None,
+) -> str:
+    """Facturación de UN cliente por mes. `cod_cliente` ya salió de la
+    búsqueda filtrada por cartera, así que es un int del propio padrón.
+
+    Con `vendedor_codigo` el número es "lo que VOS le facturaste" y no "lo que
+    el cliente compró": un cliente de la cartera por zona puede tener
+    comprobantes de otro vendedor, y esos no le corresponden. La etiqueta de
+    la respuesta lo dice explícitamente para que nadie lea el número de más."""
+    filtro_v = f" AND vc.Vendedor = {int(vendedor_codigo)}" if vendedor_codigo is not None else ""
+    if niveles:
+        return f"""
+SELECT YEAR(DATEADD(DAY,vc.FecMovim,'1800-12-28')) AS Anio,
+  MONTH(DATEADD(DAY,vc.FecMovim,'1800-12-28')) AS Mes,
+  SUM({_MONTO_RENGLON}) AS Importe,
+  COUNT(DISTINCT vc.NroMovVenta) AS Comprobantes
+{_SQL_JOIN_LINEA.strip()}
+WHERE vc.FecMovim >= {_dias(desde)} AND vc.FecMovim < {_dias(hasta_exclusivo)}
+  AND vc.CodCliente = {int(cod_cliente)}
+  AND ap.Nivel1 IN ({_in_niveles(niveles)}){filtro_v}
+GROUP BY YEAR(DATEADD(DAY,vc.FecMovim,'1800-12-28')), MONTH(DATEADD(DAY,vc.FecMovim,'1800-12-28'))
+ORDER BY 1,2
+""".strip()
+    return f"""
+SELECT YEAR(DATEADD(DAY,vc.FecMovim,'1800-12-28')) AS Anio,
+  MONTH(DATEADD(DAY,vc.FecMovim,'1800-12-28')) AS Mes,
+  SUM(CASE WHEN vc.CompCodigo IN (1,2,11) THEN vc.Neto+vc.NoGravado
+           WHEN vc.CompCodigo IN (22,23,24,25) THEN -(vc.Neto+vc.NoGravado)
+           ELSE 0 END) AS Importe,
+  COUNT(*) AS Comprobantes
+FROM Ven_CompCabecera vc
+WHERE vc.FecMovim >= {_dias(desde)} AND vc.FecMovim < {_dias(hasta_exclusivo)}
+  AND vc.CodCliente = {int(cod_cliente)}{filtro_v}
+GROUP BY YEAR(DATEADD(DAY,vc.FecMovim,'1800-12-28')), MONTH(DATEADD(DAY,vc.FecMovim,'1800-12-28'))
+ORDER BY 1,2
+""".strip()
+
+
+def _sql_ranking_clientes(
+    desde: dt.date, hasta_exclusivo: dt.date, vendedor_codigo: int | None
+) -> str:
+    """"Mis mejores clientes". Para un no-admin sale filtrado por su código —
+    no hace falta el JOIN de cartera: lo que él facturó ES suyo por
+    definición, y el JOIN costaría un scan más sin cambiar el resultado."""
+    filtro = f" AND vc.Vendedor = {int(vendedor_codigo)}" if vendedor_codigo is not None else ""
+    return f"""
+SELECT TOP 15 vc.CodCliente AS Codigo, LTRIM(RTRIM(c.Cliente_Nombre)) AS Nombre,
+  SUM(CASE WHEN vc.CompCodigo IN (1,2,11) THEN vc.Neto+vc.NoGravado
+           WHEN vc.CompCodigo IN (22,23,24,25) THEN -(vc.Neto+vc.NoGravado)
+           ELSE 0 END) AS Importe,
+  COUNT(*) AS Comprobantes
+FROM Ven_CompCabecera vc
+LEFT JOIN MAGNUS_SITD.dbo.Clientes c ON c.CodCliente = vc.CodCliente
+WHERE vc.FecMovim >= {_dias(desde)} AND vc.FecMovim < {_dias(hasta_exclusivo)}{filtro}
+GROUP BY vc.CodCliente, c.Cliente_Nombre
+ORDER BY Importe DESC
+""".strip()
+
+
+_MSG_OTRO_VENDEDOR = (
+    "No puedo darte datos de otro vendedor — solo tu propia facturación. "
+    "Si necesitás comparar con el resto, pedíselo a un administrador."
+)
+
+
+def _msg_cliente_ajeno(nombre: str | None) -> str:
+    quien = f'"{nombre}"' if nombre else "Ese cliente"
+    return (
+        f"{quien} no está en tu cartera, así que no puedo darte información "
+        "suya. Si te lo asignaron hace poco y todavía no lo ves, avisale a un "
+        "administrador."
+    )
 
 
 # Aclaración al pie de cualquier corte por línea: el número sale de los
@@ -515,6 +890,93 @@ _MSG_FALLO_MAGNUS = (
 )
 
 
+async def _responder_cliente(
+    tokens: list[str],
+    desde: dt.date,
+    hasta: dt.date,
+    etiqueta: str,
+    vendedor_codigo: int | None,
+    lineas_pedidas: list[tuple[str, list[int]]],
+) -> str | None:
+    """Facturación de UN cliente, con el gate de cartera aplicado en el SQL.
+
+    Devuelve None (y el caller sigue con el flujo normal) sólo si el término
+    quedó vacío después de sanear — nunca por falta de permiso: eso se responde
+    con `_msg_cliente_ajeno`.
+
+    Las tres salidas posibles cuando hay término:
+      · está en su cartera        → el número.
+      · existe pero no es suyo    → "no está en tu cartera".
+      · no existe / mal escrito   → "no lo encontré".
+    """
+    if not _where_like_cliente(tokens):
+        return None
+
+    tsv = await _ejecutar_sql(_sql_buscar_cliente(tokens, vendedor_codigo))
+    encontrados = _parsear_tsv_clientes(tsv)
+
+    if not encontrados:
+        # ¿Existe fuera de su cartera? Distinguirlo es lo que pidió el negocio:
+        # "no te corresponde" y "no existe" son problemas distintos para el que
+        # pregunta. Sólo se mira el NOMBRE, nunca un importe.
+        ajenos = _parsear_tsv_nombres(await _ejecutar_sql(_sql_existe_cliente(tokens)))
+        if ajenos:
+            log.warning(
+                f"[VENTAS] vendedor {vendedor_codigo} pidió el cliente "
+                f"{ajenos[0]!r}, que no es de su cartera — denegado"
+            )
+            return _msg_cliente_ajeno(ajenos[0] if len(ajenos) == 1 else None)
+        return (
+            f"No encontré ningún cliente que coincida con \"{' '.join(tokens)}\". "
+            "Probá con el nombre completo o con el código de cliente."
+        )
+
+    if len(encontrados) > 1:
+        # Ambiguo: se listan los suyos y elige. Todos salieron del SELECT ya
+        # filtrado por cartera, así que mostrarlos no revela nada ajeno.
+        opciones = "\n".join(f"- {n} (cód. {c})" for c, n in encontrados)
+        return f"Encontré más de un cliente tuyo con ese nombre:\n\n{opciones}\n\n¿Cuál de todos?"
+
+    cod_cliente, nombre_cliente = encontrados[0]
+    niveles = lineas_pedidas[0][1] if lineas_pedidas else None
+    detalle_linea = lineas_pedidas[0][0] if lineas_pedidas else None
+
+    tsv = await _ejecutar_sql(
+        _sql_facturacion_cliente(desde, hasta, cod_cliente, vendedor_codigo, niveles)
+    )
+    filas = _parsear_tsv(tsv)
+
+    quien = f"{nombre_cliente} (cód. {cod_cliente})"
+    if detalle_linea:
+        quien = f"{quien}, línea {detalle_linea}"
+    # Para un vendedor el número es lo que ÉL facturó, no lo que el cliente
+    # compró: un cliente de su zona puede tener comprobantes de otro vendedor.
+    de_quien = "" if vendedor_codigo is None else " (lo que le facturaste vos)"
+    pie = f"\n\n{_PIE_LINEA}" if detalle_linea else ""
+
+    if not filas:
+        return f"No encontré facturación de {quien} en {etiqueta}{de_quien}."
+
+    total = sum(f["importe"] for f in filas)
+    comprobantes = sum(f["comprobantes"] for f in filas)
+    if len(filas) == 1:
+        f = filas[0]
+        return (
+            f"Facturación de {quien} en {etiqueta}{de_quien}: {_monto(f['importe'])} "
+            f"({f['comprobantes']} comprobantes).{pie}"
+        )
+
+    out = [f"Facturación de {quien}, {etiqueta}{de_quien}:", ""]
+    for f in filas:
+        out.append(
+            f"- {_NOMBRE_MES[f['mes']]} {f['anio']}: {_monto(f['importe'])} "
+            f"({f['comprobantes']} comp.)"
+        )
+    out.append("")
+    out.append(f"Total del período: {_monto(total)} ({comprobantes} comprobantes).")
+    return "\n".join(out) + pie
+
+
 async def responder_ventas(mensaje: str, vendedor_codigo: int | None, es_admin: bool) -> str:
     """Punto de entrada del intent "ventas". `vendedor_codigo` ya viene
     resuelto y validado por el caller (nodes.py) — ver el docstring del
@@ -529,6 +991,9 @@ async def responder_ventas(mensaje: str, vendedor_codigo: int | None, es_admin: 
         )
 
     desde, hasta, etiqueta = _parsear_rango(mensaje)
+    # Sólo se completa cuando un ADMIN pide explícitamente por un vendedor:
+    # cambia el "tu cartera" de la respuesta por el nombre de esa persona.
+    etiqueta_vendedor: str | None = None
 
     # ¿Nombró alguna línea de producto? (bulones, mangueras, …). Si el catálogo
     # no se puede leer, se sigue sin corte por línea en vez de fallar: es mejor
@@ -540,6 +1005,67 @@ async def responder_ventas(mensaje: str, vendedor_codigo: int | None, es_admin: 
         return _MSG_FALLO_MAGNUS
     except Exception:
         log.exception("no pude leer el catálogo de líneas — sigo sin corte por línea")
+
+    # ── GATE 1: cliente ──────────────────────────────────────────────────────
+    # Va PRIMERO que el gate de vendedor a propósito: una razón social puede
+    # contener el apellido de un vendedor ("FERRETERÍA BLANCO") y si corriera
+    # antes el otro gate se negaría una consulta que sí le corresponde.
+    #
+    # Consecuencia conocida: un admin que pregunte "cuánto le vendió Blanco al
+    # cliente Rossi" recibe el total del cliente entre TODOS los vendedores, no
+    # el de Blanco. Es un número de menos precisión, no un dato de más — y
+    # cruzar los dos gates traería de vuelta el falso positivo de la razón
+    # social. Si algún día hace falta, resolverlo solo para es_admin.
+    tokens_cliente = _detectar_cliente_pedido(mensaje)
+    if tokens_cliente:
+        try:
+            respuesta = await _responder_cliente(
+                tokens_cliente, desde, hasta, etiqueta, vendedor_codigo, lineas_pedidas
+            )
+        except _FalloMagnus:
+            return _MSG_FALLO_MAGNUS
+        if respuesta is not None:
+            return respuesta
+        # None = no se pudo armar el término de búsqueda; sigue el flujo normal.
+
+    elif _PATRON_RANKING_CLIENTES.search(mensaje or ""):
+        # "mis mejores clientes" / "qué cliente me compró más": el filtro por
+        # vendedor ya deja adentro solo lo suyo.
+        try:
+            tsv = await _ejecutar_sql(_sql_ranking_clientes(desde, hasta, vendedor_codigo))
+        except _FalloMagnus:
+            return _MSG_FALLO_MAGNUS
+        titulo = (
+            f"Clientes de toda la empresa, {etiqueta}" if vendedor_codigo is None
+            else f"Tus clientes, {etiqueta}"
+        )
+        return _formatear_ranking(
+            _parsear_tsv_ranking(tsv), titulo, 15, sustantivo="clientes"
+        )
+
+    else:
+        # ── GATE 2: ¿nombró a otro vendedor? ─────────────────────────────────
+        # Un no-admin no puede ver a nadie más, ni siquiera preguntando por el
+        # nombre en vez de pedir el ranking. Un admin sí: se usa como filtro.
+        try:
+            mencionado = _detectar_vendedor_mencionado(mensaje, await _catalogo_vendedores())
+        except _FalloMagnus:
+            return _MSG_FALLO_MAGNUS
+        except Exception:
+            log.exception("no pude leer el maestro de vendedores")
+            mencionado = None
+
+        if mencionado and mencionado[0] != vendedor_codigo:
+            if not es_admin:
+                log.warning(
+                    f"[VENTAS] vendedor {vendedor_codigo} pidió datos de "
+                    f"{mencionado[0]} ({mencionado[1]}) — denegado"
+                )
+                return _MSG_OTRO_VENDEDOR
+            # admin: la consulta pasa a ser sobre ESE vendedor
+            vendedor_codigo = mencionado[0]
+            etiqueta_vendedor = f"{mencionado[1]} (cód. {mencionado[0]})"
+            log.info(f"[VENTAS] admin consulta al vendedor {mencionado[0]} ({mencionado[1]})")
 
     # Ranking ENTRE vendedores ("qué vendedor vendió más"): solo admin — ver
     # docstring del módulo. Un no-admin que lo pida no se queda sin respuesta:
@@ -590,7 +1116,12 @@ async def responder_ventas(mensaje: str, vendedor_codigo: int | None, es_admin: 
         return _MSG_FALLO_MAGNUS
 
     filas = _parsear_tsv(tsv)
-    quien = "toda la empresa" if vendedor_codigo is None else f"tu cartera (vendedor {vendedor_codigo})"
+    if vendedor_codigo is None:
+        quien = "toda la empresa"
+    elif etiqueta_vendedor:
+        quien = etiqueta_vendedor
+    else:
+        quien = f"tu cartera (vendedor {vendedor_codigo})"
     if detalle:
         quien = f"{quien}, línea {detalle}"
     if not filas:

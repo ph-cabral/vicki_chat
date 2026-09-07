@@ -85,9 +85,13 @@ Reglas:
 - "ventas": pregunta por facturación, ventas o desempeño comercial — SU
   PROPIA ("cómo vengo este mes", "cuánto facturé", "mis ventas de agosto") o
   comparando VENDEDORES YA EMPLEADOS ("qué vendedor vendió más en agosto",
-  "ranking de vendedores", "quién factura más"). Si no está habilitado o no
-  tiene permiso para ver el ranking, igual clasificalo así — esa respuesta la
-  da el nodo, no vos.
+  "ranking de vendedores", "quién factura más"). También cuando pregunta por
+  un CLIENTE ("cuánto le vendí al cliente Rossi", "qué compró el cliente
+  4521", "mis mejores clientes"). Si no está habilitado, no tiene permiso
+  para ver el ranking, o el cliente/vendedor por el que pregunta no le
+  corresponde, igual clasificalo así — esa respuesta la da el nodo, no vos.
+  NUNCA respondas vos con datos de facturación, de un cliente o de otro
+  vendedor: el permiso se resuelve en el nodo contra la sesión del usuario.
   OJO, no confundir con "search"/"ranking": si preguntan por CANDIDATOS para
   CONTRATAR a un puesto de vendedor ("busco un vendedor mostrador", "candidatos
   para vendedor viajante"), eso es "search", no "ventas". La diferencia es
