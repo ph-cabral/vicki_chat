@@ -115,6 +115,79 @@ def _parsear_rango(mensaje: str, hoy: dt.date | None = None) -> tuple[dt.date, d
     return desde, hoy + dt.timedelta(days=1), "este mes"
 
 
+# ── LA OTRA SUB-EMPRESA: PRUEBA (2026-09-07) ─────────────────────────────────
+# La venta de Ever Wear sale de DOS sub-empresas: MAGNUS (`Ven_*`) y PRUEBA
+# (`PRU_Ven_*`). `PRU_` NO es una copia de prueba — son comprobantes reales,
+# ~5% de la facturación (452.136.253 sobre 9.302.435.939 en ene-ago 2026), y
+# el cubo del BI los suma. Leyendo sólo `Ven_*`, TODO lo que contestaba este
+# módulo quedaba por debajo, y bastante más que un 5% en los vendedores con
+# mucha bonificación: BECCARIA GERARDO 1-6/09/2026 daba 20.249.816 contra los
+# 16.487.281 reales, porque PRUEBA le aporta +3,7M de facturas y -7,5M de NC.
+# Ver `indicadores-api/subempresas.py`, que hace lo mismo del lado de la web.
+#
+# Los maestros de artículos y clientes son COMPARTIDOS (verificado sobre 2026:
+# 0 renglones de PRUEBA sin `StkFer_*`, los 253 clientes en
+# `MAGNUS_SITD.dbo.Clientes`), así que la gemela cambia SÓLO las tablas del
+# circuito de ventas. `MAGNUS_SITD.dbo.*` no matchea ninguna de estas cadenas.
+#
+# Diferencia con la web: allá cada lista blanca de comprobantes hay que
+# traducirla porque PRUEBA tiene su propio `PRU_Ven_CodCom`. Acá NO hace falta:
+# el criterio de cabecera de este módulo (1,2,11 suman / 22,23,24,25 restan
+# sobre Neto+NoGravado) es el que ya está conciliado contra el pivot del BI
+# para PRUEBA — da 452.136.253 contra los 452.136.252 del cubo, $1 de redondeo
+# (ver memoria 'facturacion-prueba-pivot'). Y las consultas por línea no
+# filtran por comprobante: sólo miran el signo de `Ven_CodCom.DebitoCredito`.
+# Si algún día se le agrega una lista blanca a este módulo, ahí SÍ hay que
+# traducirla — los mismos números significan otra cosa en cada sub-empresa.
+_TABLAS_PRUEBA = (
+    "Ven_CompCabecera",
+    "Ven_CompRenglon",
+    "Ven_CodCom",
+    "Ven_RenDebCre",
+    "Ven_ConcDebCre",
+    "Ven_Clientes",
+)
+
+
+def _a_prueba(sql: str) -> str:
+    """La misma consulta, contra la sub-empresa PRUEBA. Ninguna de las tablas
+    de `_TABLAS_PRUEBA` es prefijo de otra, así que el orden no importa.
+
+    OJO: no pasarle una consulta que embeba `_sql_cartera()` — la cartera ya
+    resuelve las dos sub-empresas por su cuenta y reescribirla la dejaría
+    mirando sólo PRUEBA. Hoy ninguna de las que se unen acá la usa."""
+    for tabla in _TABLAS_PRUEBA:
+        sql = sql.replace(tabla, "PRU_" + tabla)
+    return sql
+
+
+def _dos_subempresas(sql: str, select: str, group_by: str, cola: str = "") -> str:
+    """MAGNUS + PRUEBA en UNA sola consulta, re-agregando por fuera.
+
+    `sql` es la consulta de MAGNUS ya agrupada y SIN ORDER BY ni TOP (una
+    tabla derivada no los admite): el orden y el recorte van en `cola` y en
+    `select`, sobre el resultado ya sumado — recortar adentro podría dejar
+    afuera a alguien que es chico en MAGNUS y grande en PRUEBA.
+
+    Re-agregar un agregado es correcto acá: SUM de SUM es SUM, y los COUNT se
+    suman porque los universos son disjuntos (son tablas distintas, ningún
+    NroMovVenta se repite entre las dos).
+
+    Va en UNA consulta y no en dos como hace la web (`subempresas.filas_dos`)
+    porque acá cada ida a Magnus es un round-trip HTTP contra el servicio de
+    red: dos consultas serían el doble de latencia. Cada rama de la UNION
+    conserva igual su propio plan (seek por fecha) y PRUEBA es chica."""
+    return f"""
+SELECT {select}
+FROM (
+{sql}
+UNION ALL
+{_a_prueba(sql)}
+) u
+GROUP BY {group_by}
+{cola}""".strip()
+
+
 def _sql_reporte_mensual(desde: dt.date, hasta_exclusivo: dt.date, vendedor_codigo: int | None) -> str:
     """SUM(Neto+NoGravado) con signo por CompCodigo (1,2,11 suman; 22,23,24,25
     restan — notas de crédito/devolución), agrupado por mes. Mismo criterio
@@ -126,7 +199,7 @@ def _sql_reporte_mensual(desde: dt.date, hasta_exclusivo: dt.date, vendedor_codi
     que interpolarlo en el SQL es seguro (no hay forma de inyectar texto).
     """
     filtro_vendedor = f" AND Vendedor = {int(vendedor_codigo)}" if vendedor_codigo is not None else ""
-    return f"""
+    magnus = f"""
 SELECT YEAR(DATEADD(DAY,FecMovim,'1800-12-28')) AS Anio,
   MONTH(DATEADD(DAY,FecMovim,'1800-12-28')) AS Mes,
   SUM(CASE WHEN CompCodigo IN (1,2,11) THEN Neto+NoGravado
@@ -136,8 +209,13 @@ SELECT YEAR(DATEADD(DAY,FecMovim,'1800-12-28')) AS Anio,
 FROM Ven_CompCabecera
 WHERE FecMovim >= {_dias(desde)} AND FecMovim < {_dias(hasta_exclusivo)}{filtro_vendedor}
 GROUP BY YEAR(DATEADD(DAY,FecMovim,'1800-12-28')), MONTH(DATEADD(DAY,FecMovim,'1800-12-28'))
-ORDER BY 1,2
 """.strip()
+    return _dos_subempresas(
+        magnus,
+        select="Anio, Mes, SUM(Importe) AS Importe, SUM(Comprobantes) AS Comprobantes",
+        group_by="Anio, Mes",
+        cola="ORDER BY 1,2",
+    )
 
 
 _NOMBRE_MES = ["", "ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
@@ -162,7 +240,7 @@ def _sql_ranking_vendedores(desde: dt.date, hasta_exclusivo: dt.date) -> str:
     vendedor, es justamente lo que se pide: comparar entre todos. Joinea
     contra el maestro `Vendedores` (MAGNUS_SITD.dbo, NO `Ped_Usu_Arma` — ver
     memoria 'magnus-codigos-vendedor') para el nombre."""
-    return f"""
+    magnus = f"""
 SELECT c.Vendedor AS VendedorCodigo, v.VendedorNombre,
   SUM(CASE WHEN c.CompCodigo IN (1,2,11) THEN c.Neto+c.NoGravado
            WHEN c.CompCodigo IN (22,23,24,25) THEN -(c.Neto+c.NoGravado)
@@ -172,8 +250,16 @@ FROM Ven_CompCabecera c
 LEFT JOIN MAGNUS_SITD.dbo.Vendedores v ON v.VendedorCodigo = c.Vendedor
 WHERE c.FecMovim >= {_dias(desde)} AND c.FecMovim < {_dias(hasta_exclusivo)}
 GROUP BY c.Vendedor, v.VendedorNombre
-ORDER BY Importe DESC
 """.strip()
+    # El maestro `Vendedores` es compartido, así que el nombre es el mismo en
+    # las dos ramas y MAX() sólo lo arrastra.
+    return _dos_subempresas(
+        magnus,
+        select=("VendedorCodigo, MAX(VendedorNombre) AS VendedorNombre, "
+                "SUM(Importe) AS Importe, SUM(Comprobantes) AS Comprobantes"),
+        group_by="VendedorCodigo",
+        cola="ORDER BY Importe DESC",
+    )
 
 
 # ── Corte por línea de producto ───────────────────────────────────────────────
@@ -328,7 +414,7 @@ def _in_niveles(niveles: list[int]) -> str:
 def _sql_ranking_vendedores_linea(desde: dt.date, hasta_exclusivo: dt.date, niveles: list[int]) -> str:
     """Ranking entre vendedores acotado a una línea (solo admin, igual que
     _sql_ranking_vendedores)."""
-    return f"""
+    magnus = f"""
 SELECT vc.Vendedor AS VendedorCodigo, v.VendedorNombre,
   SUM({_MONTO_RENGLON}) AS Importe,
   COUNT(DISTINCT vc.NroMovVenta) AS Comprobantes
@@ -337,8 +423,14 @@ LEFT JOIN MAGNUS_SITD.dbo.Vendedores v ON v.VendedorCodigo = vc.Vendedor
 WHERE vc.FecMovim >= {_dias(desde)} AND vc.FecMovim < {_dias(hasta_exclusivo)}
   AND ap.Nivel1 IN ({_in_niveles(niveles)})
 GROUP BY vc.Vendedor, v.VendedorNombre
-ORDER BY Importe DESC
 """.strip()
+    return _dos_subempresas(
+        magnus,
+        select=("VendedorCodigo, MAX(VendedorNombre) AS VendedorNombre, "
+                "SUM(Importe) AS Importe, SUM(Comprobantes) AS Comprobantes"),
+        group_by="VendedorCodigo",
+        cola="ORDER BY Importe DESC",
+    )
 
 
 def _sql_total_linea(
@@ -349,7 +441,7 @@ def _sql_total_linea(
     quién facturó el comprobante (mismo criterio que el resto de este módulo;
     /ventas/bulones en cambio corta por cartera, así que pueden no coincidir)."""
     filtro = f" AND vc.Vendedor = {int(vendedor_codigo)}" if vendedor_codigo is not None else ""
-    return f"""
+    magnus = f"""
 SELECT YEAR(DATEADD(DAY,vc.FecMovim,'1800-12-28')) AS Anio,
   MONTH(DATEADD(DAY,vc.FecMovim,'1800-12-28')) AS Mes,
   SUM({_MONTO_RENGLON}) AS Importe,
@@ -358,8 +450,13 @@ SELECT YEAR(DATEADD(DAY,vc.FecMovim,'1800-12-28')) AS Anio,
 WHERE vc.FecMovim >= {_dias(desde)} AND vc.FecMovim < {_dias(hasta_exclusivo)}
   AND ap.Nivel1 IN ({_in_niveles(niveles)}){filtro}
 GROUP BY YEAR(DATEADD(DAY,vc.FecMovim,'1800-12-28')), MONTH(DATEADD(DAY,vc.FecMovim,'1800-12-28'))
-ORDER BY 1,2
 """.strip()
+    return _dos_subempresas(
+        magnus,
+        select="Anio, Mes, SUM(Importe) AS Importe, SUM(Comprobantes) AS Comprobantes",
+        group_by="Anio, Mes",
+        cola="ORDER BY 1,2",
+    )
 
 
 def _parsear_tsv_ranking(tsv: str) -> list[dict]:
@@ -699,7 +796,15 @@ _DIA_CORTE_CARTERA = (
 
 
 def _sql_cartera(vendedor_codigo: int) -> str:
-    """Subconsulta con los CodCliente de la cartera de UN vendedor."""
+    """Subconsulta con los CodCliente de la cartera de UN vendedor.
+
+    El historial mira LAS DOS SUB-EMPRESAS, igual que `cartera.py` del lado
+    de la web: un cliente al que el vendedor sólo le facturó por PRUEBA es
+    igual de suyo, y sin esta rama el gate lo trataba como cliente ajeno y le
+    negaba sus propios números.
+
+    Esta consulta NO se pasa nunca por `_a_prueba()` — ya resuelve las dos
+    sub-empresas y reescribirla la dejaría mirando sólo PRUEBA."""
     v = int(vendedor_codigo)
     return f"""
 SELECT c2.CodCliente
@@ -712,6 +817,10 @@ UNION
 SELECT DISTINCT vch.CodCliente
 FROM Ven_CompCabecera vch
 WHERE vch.vendedor = {v} AND vch.FecMovim >= {_DIA_CORTE_CARTERA}
+UNION
+SELECT DISTINCT vcp.CodCliente
+FROM PRU_Ven_CompCabecera vcp
+WHERE vcp.vendedor = {v} AND vcp.FecMovim >= {_DIA_CORTE_CARTERA}
 """.strip()
 
 
@@ -880,8 +989,13 @@ def _sql_facturacion_cliente(
     comprobantes de otro vendedor, y esos no le corresponden. La etiqueta de
     la respuesta lo dice explícitamente para que nadie lea el número de más."""
     filtro_v = f" AND vc.Vendedor = {int(vendedor_codigo)}" if vendedor_codigo is not None else ""
+    mensual = dict(
+        select="Anio, Mes, SUM(Importe) AS Importe, SUM(Comprobantes) AS Comprobantes",
+        group_by="Anio, Mes",
+        cola="ORDER BY 1,2",
+    )
     if niveles:
-        return f"""
+        magnus = f"""
 SELECT YEAR(DATEADD(DAY,vc.FecMovim,'1800-12-28')) AS Anio,
   MONTH(DATEADD(DAY,vc.FecMovim,'1800-12-28')) AS Mes,
   SUM({_MONTO_RENGLON}) AS Importe,
@@ -891,9 +1005,9 @@ WHERE vc.FecMovim >= {_dias(desde)} AND vc.FecMovim < {_dias(hasta_exclusivo)}
   AND vc.CodCliente = {int(cod_cliente)}
   AND ap.Nivel1 IN ({_in_niveles(niveles)}){filtro_v}
 GROUP BY YEAR(DATEADD(DAY,vc.FecMovim,'1800-12-28')), MONTH(DATEADD(DAY,vc.FecMovim,'1800-12-28'))
-ORDER BY 1,2
 """.strip()
-    return f"""
+        return _dos_subempresas(magnus, **mensual)
+    magnus = f"""
 SELECT YEAR(DATEADD(DAY,vc.FecMovim,'1800-12-28')) AS Anio,
   MONTH(DATEADD(DAY,vc.FecMovim,'1800-12-28')) AS Mes,
   SUM(CASE WHEN vc.CompCodigo IN (1,2,11) THEN vc.Neto+vc.NoGravado
@@ -904,8 +1018,8 @@ FROM Ven_CompCabecera vc
 WHERE vc.FecMovim >= {_dias(desde)} AND vc.FecMovim < {_dias(hasta_exclusivo)}
   AND vc.CodCliente = {int(cod_cliente)}{filtro_v}
 GROUP BY YEAR(DATEADD(DAY,vc.FecMovim,'1800-12-28')), MONTH(DATEADD(DAY,vc.FecMovim,'1800-12-28'))
-ORDER BY 1,2
 """.strip()
+    return _dos_subempresas(magnus, **mensual)
 
 
 def _sql_ranking_clientes(
@@ -915,8 +1029,8 @@ def _sql_ranking_clientes(
     no hace falta el JOIN de cartera: lo que él facturó ES suyo por
     definición, y el JOIN costaría un scan más sin cambiar el resultado."""
     filtro = f" AND vc.Vendedor = {int(vendedor_codigo)}" if vendedor_codigo is not None else ""
-    return f"""
-SELECT TOP 15 vc.CodCliente AS Codigo, LTRIM(RTRIM(c.Cliente_Nombre)) AS Nombre,
+    magnus = f"""
+SELECT vc.CodCliente AS Codigo, LTRIM(RTRIM(c.Cliente_Nombre)) AS Nombre,
   SUM(CASE WHEN vc.CompCodigo IN (1,2,11) THEN vc.Neto+vc.NoGravado
            WHEN vc.CompCodigo IN (22,23,24,25) THEN -(vc.Neto+vc.NoGravado)
            ELSE 0 END) AS Importe,
@@ -925,8 +1039,18 @@ FROM Ven_CompCabecera vc
 LEFT JOIN MAGNUS_SITD.dbo.Clientes c ON c.CodCliente = vc.CodCliente
 WHERE vc.FecMovim >= {_dias(desde)} AND vc.FecMovim < {_dias(hasta_exclusivo)}{filtro}
 GROUP BY vc.CodCliente, c.Cliente_Nombre
-ORDER BY Importe DESC
 """.strip()
+    # El TOP 15 pasa AFUERA a propósito: adentro recortaría cada sub-empresa
+    # por separado y se podría perder un cliente que es chico en MAGNUS y
+    # grande en PRUEBA. `Clientes` es el maestro compartido, así que el nombre
+    # es el mismo en las dos ramas.
+    return _dos_subempresas(
+        magnus,
+        select=("TOP 15 Codigo, MAX(Nombre) AS Nombre, "
+                "SUM(Importe) AS Importe, SUM(Comprobantes) AS Comprobantes"),
+        group_by="Codigo",
+        cola="ORDER BY Importe DESC",
+    )
 
 
 _MSG_OTRO_VENDEDOR = (

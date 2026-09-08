@@ -90,6 +90,33 @@ check("cliente + vendedor en el WHERE",
 check("solo SELECT", all(s.strip().upper().startswith("SELECT")
                          for s in (sql, sql_admin, sql_fact)), True)
 
+# ── las DOS sub-empresas ──────────────────────────────────────────────────
+# Sin esto todo lo que contesta el módulo queda por debajo (PRUEBA es ~5% de
+# la facturación, y bastante más en los vendedores con mucha bonificación).
+print("\n=== sub-empresa PRUEBA ===")
+_d1, _d2 = dt.date(2026, 9, 1), dt.date(2026, 9, 7)
+_todas = {
+    "reporte mensual": vt._sql_reporte_mensual(_d1, _d2, 13),
+    "ranking vendedores": vt._sql_ranking_vendedores(_d1, _d2),
+    "ranking vendedores x línea": vt._sql_ranking_vendedores_linea(_d1, _d2, [1]),
+    "total línea": vt._sql_total_linea(_d1, _d2, [1], 13),
+    "facturación cliente": sql_fact,
+    "facturación cliente x línea": vt._sql_facturacion_cliente(_d1, _d2, 4521, 797, [1]),
+    "ranking clientes": vt._sql_ranking_clientes(_d1, _d2, 13),
+}
+for _nombre, _s in _todas.items():
+    check(f"{_nombre}: suma PRUEBA", "PRU_Ven_" in _s, True)
+    # El recorte y el orden van AFUERA de la UNION, sobre el total ya sumado.
+    check(f"{_nombre}: sin ORDER BY adentro", _s.count("ORDER BY") <= 1, True)
+check("ranking clientes: TOP afuera",
+      _todas["ranking clientes"].strip().upper().startswith("SELECT TOP 15"), True)
+# La cartera resuelve las dos sub-empresas por su cuenta y NO se reescribe.
+_cart = vt._sql_cartera(797)
+check("cartera mira MAGNUS y PRUEBA",
+      "FROM Ven_CompCabecera vch" in _cart and "FROM PRU_Ven_CompCabecera vcp" in _cart, True)
+check("los maestros compartidos quedan intactos",
+      all("PRU_MAGNUS_SITD" not in s and "PRU_StkFer" not in s for s in _todas.values()), True)
+
 print("\n=== gates de responder_ventas (magnus mockeado) ===")
 class Mock:
     def __init__(self): self.sqls = []

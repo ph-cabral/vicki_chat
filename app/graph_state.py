@@ -28,3 +28,8 @@ class AgentState(TypedDict):
     ventas_habilitado: Optional[bool]     # False = el intent "ventas" no se ofrece
     ventas_admin: Optional[bool]          # True = sin filtro de vendedor (toda la empresa)
     ventas_vendedor_codigo: Optional[int] # código Magnus fijo para este usuario, o None si es admin
+    # ── Intent "rrhh" — ver app/asistencia_tools.py ────────────────────────
+    # Todo o nada: quien lo tiene ve la asistencia de TODA la empresa (no hay
+    # equivalente al vendedorCodigo, un dato de RRHH parcial no sirve). Lo
+    # resuelve vicki_web contra la sesión — ver lib/rrhh/vickiRrhhAcceso.ts.
+    rrhh_habilitado: Optional[bool]

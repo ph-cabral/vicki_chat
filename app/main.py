@@ -162,6 +162,11 @@ class ChatRequest(BaseModel):
     vicki_ventas_habilitado: bool = False
     vicki_ventas_admin: bool = False
     vicki_ventas_vendedor_codigo: Optional[int] = None
+    # Acceso a datos de asistencia (intent "rrhh"): mismo criterio que el de
+    # ventas — lo resuelve vicki_web contra la sesión (lib/rrhh/vickiRrhhAcceso.ts)
+    # y este backend no lo revalida. Default False: un request viejo que no lo
+    # mande no ve nada de asistencia.
+    vicki_rrhh_habilitado: bool = False
 
 
 class ChatResponse(BaseModel):
@@ -590,6 +595,8 @@ async def chat(request: ChatRequest):
             "ventas_habilitado": request.vicki_ventas_habilitado,
             "ventas_admin": request.vicki_ventas_admin,
             "ventas_vendedor_codigo": request.vicki_ventas_vendedor_codigo,
+            # intent "rrhh" — ver app/asistencia_tools.py
+            "rrhh_habilitado": request.vicki_rrhh_habilitado,
         }
 
         result = await graph.ainvoke(initial_state, config=graph_config)

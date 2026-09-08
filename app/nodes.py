@@ -121,7 +121,7 @@ router_llm = LLMWithFallback(
     ),
 )
 
-VALID_INTENTS = {"search", "ranking", "procedimiento", "ventas", "camera", "general"}
+VALID_INTENTS = {"search", "ranking", "procedimiento", "ventas", "rrhh", "camera", "general"}
 
 
 def _safe_json(text: str) -> dict:
@@ -416,6 +416,31 @@ async def ventas_node(state: AgentState) -> AgentState:
         )
     else:
         texto = await responder_ventas(state["user_message"], vendedor_codigo, es_admin)
+
+    response = AIMessage(content=texto)
+    return {**state, "messages": state["messages"] + [response], "final_response": texto}
+
+
+async def rrhh_node(state: AgentState) -> AgentState:
+    """Intent "rrhh": asistencia (faltas, feriados, horas extra). Mismo patrón
+    que ventas_node — el permiso llega resuelto por vicki_web contra la sesión
+    (ver lib/rrhh/vickiRrhhAcceso.ts) y la respuesta sale formateada de
+    app/asistencia_tools.py, sin pasar por el LLM: son números que RRHH usa
+    para liquidar, no pueden salir redondeados por un modelo.
+
+    A diferencia de ventas no hay filtro por persona: el permiso es todo o
+    nada, porque un dato de asistencia "a medias" no sirve. Por eso el gate es
+    lo único que se valida acá."""
+    from app.asistencia_tools import responder_rrhh
+
+    if not state.get("rrhh_habilitado"):
+        texto = (
+            "No tenés habilitado el acceso a los datos de asistencia. Pedile a "
+            "un administrador que te lo active en Administración → Usuarios "
+            "(columna «Vicki RRHH»)."
+        )
+    else:
+        texto = await responder_rrhh(state["user_message"])
 
     response = AIMessage(content=texto)
     return {**state, "messages": state["messages"] + [response], "final_response": texto}

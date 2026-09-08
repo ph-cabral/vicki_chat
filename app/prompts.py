@@ -73,7 +73,7 @@ Contexto reciente de la conversación (para interpretar referencias como
 {history}
 
 Clasificá el ÚLTIMO mensaje del usuario y devolvé SOLO un JSON válido, sin texto extra:
-{{"intent": "<search|ranking|procedimiento|ventas|camera|general>", "query": "..."}}
+{{"intent": "<search|ranking|procedimiento|ventas|rrhh|camera|general>", "query": "..."}}
 
 Reglas:
 - "search": pide/busca candidatos o perfiles para un puesto.
@@ -96,8 +96,21 @@ Reglas:
   CONTRATAR a un puesto de vendedor ("busco un vendedor mostrador", "candidatos
   para vendedor viajante"), eso es "search", no "ventas". La diferencia es
   personal a contratar (search) vs. desempeño de ventas ya realizadas (ventas).
+- "rrhh": pregunta por ASISTENCIA de gente que YA TRABAJA en la empresa —
+  faltas o ausencias ("cuántos días faltó Fulano", "quién faltó más el mes
+  pasado", "cuántas ausencias hubo"), feriados registrados ("qué feriados
+  registramos en julio"), horas extra ("quién hizo horas extras el mes
+  pasado", "cuántas horas extra hizo Fulano"), vacaciones, licencias,
+  enfermedad, fichadas o presentismo. Si no tiene permiso para ver esos datos,
+  igual clasificalo así — la negativa la da el nodo, no vos. NUNCA respondas
+  vos con días de falta, horas extra ni feriados: no los tenés, salen de la
+  base de asistencia.
+  OJO, no confundir con "search": si preguntan por CANDIDATOS a contratar, eso
+  es "search". Y si preguntan por FACTURACIÓN de un vendedor, es "ventas" —
+  acá va sólo la asistencia (presencia/ausencia/horas), no el desempeño
+  comercial.
 - "camera": pide una foto/snapshot de una cámara o reloj.
-- "general": saludo, charla, dudas o cualquier cosa que NO sea búsqueda de perfiles, procedimientos ni ventas propias.
+- "general": saludo, charla, dudas o cualquier cosa que NO sea búsqueda de perfiles, procedimientos, ventas propias ni asistencia.
 - "query": para search/ranking/procedimiento. Reformulá el pedido como una búsqueda
   AUTOCONTENIDA (standalone), incorporando el puesto/skills/zona que ya se
   hablaron en la conversación si el último mensaje es una referencia o un
