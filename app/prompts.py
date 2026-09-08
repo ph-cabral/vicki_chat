@@ -73,7 +73,7 @@ Contexto reciente de la conversación (para interpretar referencias como
 {history}
 
 Clasificá el ÚLTIMO mensaje del usuario y devolvé SOLO un JSON válido, sin texto extra:
-{{"intent": "<search|ranking|procedimiento|ventas|rrhh|camera|general>", "query": "..."}}
+{{"intent": "<search|ranking|procedimiento|ventas|rrhh|compras|camera|general>", "query": "..."}}
 
 Reglas:
 - "search": pide/busca candidatos o perfiles para un puesto.
@@ -109,8 +109,20 @@ Reglas:
   es "search". Y si preguntan por FACTURACIÓN de un vendedor, es "ventas" —
   acá va sólo la asistencia (presencia/ausencia/horas), no el desempeño
   comercial.
+- "compras": pregunta por FALTANTES de mercadería, órdenes de compra o ingresos
+  de un mes — "cuánto faltó en agosto", "cuánto del faltante se cubrió",
+  "cuánto tiene orden de compra", "qué ingresó el mes pasado", "cómo venimos
+  con los faltantes de importado", "cuánta plata quedó sin cubrir". También
+  cuando el corte es por origen ("faltantes nacionales", "importados"). Si no
+  tiene permiso, igual clasificalo así — la negativa la da el nodo, no vos.
+  NUNCA respondas vos con cifras de faltantes, OC ni ingresos: no las tenés,
+  salen de Magnus.
+  OJO, no confundir con "ventas": acá es lo que NO se pudo entregar por falta
+  de stock y lo que se compró para reponerlo, no lo facturado. Y si preguntan
+  por un procedimiento de compras ("cómo se carga una OC"), eso es
+  "procedimiento".
 - "camera": pide una foto/snapshot de una cámara o reloj.
-- "general": saludo, charla, dudas o cualquier cosa que NO sea búsqueda de perfiles, procedimientos, ventas propias ni asistencia.
+- "general": saludo, charla, dudas o cualquier cosa que NO sea búsqueda de perfiles, procedimientos, ventas propias, asistencia ni compras.
 - "query": para search/ranking/procedimiento. Reformulá el pedido como una búsqueda
   AUTOCONTENIDA (standalone), incorporando el puesto/skills/zona que ya se
   hablaron en la conversación si el último mensaje es una referencia o un

@@ -446,6 +446,32 @@ async def rrhh_node(state: AgentState) -> AgentState:
     return {**state, "messages": state["messages"] + [response], "final_response": texto}
 
 
+async def compras_node(state: AgentState) -> AgentState:
+    """Intent "compras": el funnel del mes (faltó → tuvo OC → ingresó). Mismo
+    patrón que ventas_node y rrhh_node — el permiso llega resuelto por
+    vicki_web contra la sesión (ver lib/compras/vickiComprasAcceso.ts) y la
+    respuesta sale ya formateada de app/compras_tools.py, sin pasar por el LLM.
+
+    Como en rrhh, el permiso es todo o nada: no hay un equivalente al
+    `vendedorCodigo` que recorte lo que se ve, porque un faltante "a medias" no
+    sirve para decidir una compra. El criterio elegido es el más simple de
+    explicar: si podés entrar a la vista /compras, el chat te contesta lo mismo
+    que ya ves ahí."""
+    from app.compras_tools import responder_compras
+
+    if not state.get("compras_habilitado"):
+        texto = (
+            "No tenés acceso a los datos de compras. Se habilita con el permiso "
+            "de la vista Compras — pedíselo a un administrador. (Si te lo "
+            "acaban de dar, cerrá sesión y volvé a entrar.)"
+        )
+    else:
+        texto = await responder_compras(state["user_message"])
+
+    response = AIMessage(content=texto)
+    return {**state, "messages": state["messages"] + [response], "final_response": texto}
+
+
 def camera_node(state):
     try:
         take_camera_snapshot()  # escribe el JPG en SNAPSHOT_PATH (servido por /snapshot)

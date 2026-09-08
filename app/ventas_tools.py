@@ -67,6 +67,73 @@ def _primer_dia_mes_sig(anio: int, mes: int) -> dt.date:
     return dt.date(anio + 1, 1, 1) if mes == 12 else dt.date(anio, mes + 1, 1)
 
 
+# ── Rangos de fecha ───────────────────────────────────────────────────────────
+# Además del mes suelto se aceptan rangos explícitos: el reporte por vendedor
+# se pide tanto por mes como por quincena o por un tramo cualquiera de días.
+# Todo por regex (no LLM) por la razón del docstring de _parsear_rango.
+_MESES_RE = "|".join(MESES)
+
+# "del 1/8 al 15/8/2026", "01-08 a 15-08"
+_PAT_RANGO_FECHAS = re.compile(
+    r"\b(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?\s*(?:al?|hasta(?:\s+el)?|y)\s*"
+    r"(?:el\s+)?(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?\b", re.I)
+
+# "del 5 de julio al 20 de agosto de 2026"
+_PAT_RANGO_DIA_MES_DIA_MES = re.compile(
+    rf"\b(\d{{1,2}})\s*(?:de\s*)?({_MESES_RE})\b(?:\s*(?:de[l]?\s*)?(20\d{{2}}))?\s*"
+    rf"(?:al?|hasta(?:\s+el)?)\s*(?:el\s+)?(\d{{1,2}})\s*(?:de\s*)?({_MESES_RE})\b"
+    rf"(?:\s*(?:de[l]?\s*)?(20\d{{2}}))?", re.I)
+
+# "del 1 al 15 de agosto", "entre el 1 y el 15 de agosto de 2026"
+_PAT_RANGO_DIAS_MES = re.compile(
+    rf"\b(?:del|desde|entre)\s*(?:el\s+)?(\d{{1,2}})\s*(?:al?|hasta(?:\s+el)?|y)\s*"
+    rf"(?:el\s+)?(\d{{1,2}})\s*de\s*({_MESES_RE})\b(?:\s*(?:de[l]?\s*)?(20\d{{2}}))?", re.I)
+
+# "de enero a agosto", "entre marzo y junio de 2026"
+_PAT_RANGO_MESES = re.compile(
+    rf"\b(?:de|desde|entre)\s+({_MESES_RE})\s+(?:al?|hasta|y)\s+({_MESES_RE})\b"
+    rf"(?:\s*(?:de[l]?\s*)?(20\d{{2}}))?", re.I)
+
+# "el 15 de agosto" — un solo día
+_PAT_DIA_MES = re.compile(
+    rf"\b(\d{{1,2}})\s*de\s*({_MESES_RE})\b(?:\s*(?:de[l]?\s*)?(20\d{{2}}))?", re.I)
+
+_PAT_ULTIMOS_DIAS = re.compile(r"\b[uú]ltim[oa]s?\s+(\d{1,3})\s+d[ií]as\b", re.I)
+_PAT_ULTIMOS_MESES = re.compile(r"\b[uú]ltim[oa]s?\s+(\d{1,2})\s+meses\b", re.I)
+_PAT_TRIMESTRE = re.compile(
+    r"\b(primer|1er|1|segundo|2do|2|tercer|3er|3|cuarto|4to|4)\w*\s+trimestre\b", re.I)
+_PAT_SEMESTRE = re.compile(r"\b(primer|1er|1|segundo|2do|2)\w*\s+semestre\b", re.I)
+_ORDINALES = {"primer": 1, "1er": 1, "1": 1, "segundo": 2, "2do": 2, "2": 2,
+              "tercer": 3, "3er": 3, "3": 3, "cuarto": 4, "4to": 4, "4": 4}
+
+
+def _fecha(anio: int, mes: int, dia: int) -> dt.date | None:
+    """None si la fecha no existe (31 de febrero, 15/13): el caller sigue
+    probando los otros patrones en vez de romper la respuesta."""
+    try:
+        return dt.date(anio, mes, dia)
+    except ValueError:
+        return None
+
+
+def _anio(txt: str | None, hoy: dt.date) -> int:
+    """Año del texto ("2026" o "26"); si no se escribió, el año en curso."""
+    if not txt:
+        return hoy.year
+    n = int(txt)
+    return n if n >= 1000 else 2000 + n
+
+
+def _rango_dias(d1: dt.date, d2: dt.date) -> tuple[dt.date, dt.date, str]:
+    """Rango INCLUSIVO como lo dice el usuario → [desde, hasta_exclusivo) para
+    el SQL. Se ordena solo, así "del 15 al 1" no devuelve vacío."""
+    if d2 < d1:
+        d1, d2 = d2, d1
+    etiqueta = (f"el {d1.strftime('%d/%m/%Y')}" if d1 == d2 else
+                f"el período {d1.strftime('%d/%m/%Y')} – {d2.strftime('%d/%m/%Y')}")
+    return d1, d2 + dt.timedelta(days=1), etiqueta
+
+
 def _parsear_rango(mensaje: str, hoy: dt.date | None = None) -> tuple[dt.date, dt.date, str]:
     """Determinístico a propósito (no vía LLM): un rango de fechas mal
     interpretado da una facturación mal calculada sin que nadie lo note. Mejor
@@ -75,25 +142,117 @@ def _parsear_rango(mensaje: str, hoy: dt.date | None = None) -> tuple[dt.date, d
 
     Devuelve (desde, hasta_exclusivo, etiqueta) — hasta_exclusivo para poder
     filtrar con `>= desde AND < hasta` sin off-by-one.
+
+    Formas reconocidas, en este orden (la primera que matchea gana):
+      · "del 1/8 al 15/8/2026", "01-08 a 15-08"
+      · "del 5 de julio al 20 de agosto"
+      · "del 1 al 15 de agosto", "entre el 1 y el 15 de agosto de 2026"
+      · "de enero a agosto", "entre marzo y junio de 2026"
+      · "primer trimestre", "segundo semestre" (con año opcional)
+      · "últimos 30 días", "últimos 3 meses"
+      · "el 15 de agosto" (un día suelto)
+      · mes suelto ("agosto", "agosto 2025"), hoy, ayer, esta semana,
+        semana pasada, mes pasado, año / año NNNN
+      · default: el mes en curso.
     """
     hoy = hoy or dt.date.today()
     m = (mensaje or "").lower()
-
-    # año explícito (con o sin mes)
     anio_match = re.search(r"\b(20\d{2})\b", m)
     anio = int(anio_match.group(1)) if anio_match else None
 
-    mes_encontrado = next((nombre for nombre in MESES if nombre in m), None)
+    # 1) dos fechas numéricas: "del 1/8 al 15/8/2026"
+    g = _PAT_RANGO_FECHAS.search(m)
+    if g:
+        d1 = _fecha(_anio(g.group(3) or g.group(6), hoy), int(g.group(2)), int(g.group(1)))
+        d2 = _fecha(_anio(g.group(6) or g.group(3), hoy), int(g.group(5)), int(g.group(4)))
+        if d1 and d2:
+            return _rango_dias(d1, d2)
 
+    # 2) "del 5 de julio al 20 de agosto"
+    g = _PAT_RANGO_DIA_MES_DIA_MES.search(m)
+    if g:
+        d1 = _fecha(_anio(g.group(3) or g.group(6), hoy), MESES[g.group(2)], int(g.group(1)))
+        d2 = _fecha(_anio(g.group(6) or g.group(3), hoy), MESES[g.group(5)], int(g.group(4)))
+        if d1 and d2:
+            return _rango_dias(d1, d2)
+
+    # 3) "del 1 al 15 de agosto"
+    g = _PAT_RANGO_DIAS_MES.search(m)
+    if g:
+        y, mes = _anio(g.group(4), hoy), MESES[g.group(3)]
+        d1, d2 = _fecha(y, mes, int(g.group(1))), _fecha(y, mes, int(g.group(2)))
+        if d1 and d2:
+            return _rango_dias(d1, d2)
+
+    # 4) "de enero a agosto de 2026" — rango de meses completos
+    g = _PAT_RANGO_MESES.search(m)
+    if g:
+        y = _anio(g.group(3), hoy)
+        n1, n2 = MESES[g.group(1)], MESES[g.group(2)]
+        etq1, etq2 = g.group(1), g.group(2)
+        if n2 < n1:
+            n1, n2, etq1, etq2 = n2, n1, etq2, etq1
+        return dt.date(y, n1, 1), _primer_dia_mes_sig(y, n2), f"el período {etq1}–{etq2} {y}"
+
+    # 5) trimestres y semestres
+    g = _PAT_TRIMESTRE.search(m)
+    if g:
+        n = _ORDINALES[g.group(1).lower()]
+        y = anio or hoy.year
+        return dt.date(y, 3 * n - 2, 1), _primer_dia_mes_sig(y, 3 * n), f"el {n}º trimestre de {y}"
+    g = _PAT_SEMESTRE.search(m)
+    if g:
+        n = _ORDINALES[g.group(1).lower()]
+        y = anio or hoy.year
+        return dt.date(y, 6 * n - 5, 1), _primer_dia_mes_sig(y, 6 * n), f"el {n}º semestre de {y}"
+
+    # 6) ventanas móviles: "últimos 30 días" / "últimos 3 meses"
+    g = _PAT_ULTIMOS_DIAS.search(m)
+    if g:
+        n = max(1, int(g.group(1)))
+        return hoy - dt.timedelta(days=n - 1), hoy + dt.timedelta(days=1), f"los últimos {n} días"
+    g = _PAT_ULTIMOS_MESES.search(m)
+    if g:
+        n = max(1, int(g.group(1)))
+        y, mes = hoy.year, hoy.month - (n - 1)
+        while mes <= 0:
+            mes += 12
+            y -= 1
+        return dt.date(y, mes, 1), hoy + dt.timedelta(days=1), f"los últimos {n} meses"
+
+    # 7) un día suelto: "el 15 de agosto"
+    g = _PAT_DIA_MES.search(m)
+    if g:
+        d = _fecha(_anio(g.group(3), hoy), MESES[g.group(2)], int(g.group(1)))
+        if d:
+            return _rango_dias(d, d)
+
+    # 8) un mes suelto — el que aparezca ANTES en el mensaje, no el primero del
+    # calendario: "cuánto vendió Julio Blanco en agosto" ya no se lee como
+    # julio sólo porque julio viene antes en el diccionario (el caller además
+    # vuelve a parsear sin el nombre del vendedor, ver _sin_nombres_vendedor).
+    mes_encontrado = min(
+        (nombre for nombre in MESES if re.search(rf"\b{nombre}\b", m)),
+        key=m.index, default=None,
+    )
     if mes_encontrado:
         mes = MESES[mes_encontrado]
         y = anio or hoy.year
-        desde = dt.date(y, mes, 1)
-        hasta = _primer_dia_mes_sig(y, mes)
-        return desde, hasta, f"{mes_encontrado} {y}"
+        return dt.date(y, mes, 1), _primer_dia_mes_sig(y, mes), f"{mes_encontrado} {y}"
+
+    if "ayer" in m:
+        ayer = hoy - dt.timedelta(days=1)
+        return _rango_dias(ayer, ayer)
 
     if "hoy" in m:
         return hoy, hoy + dt.timedelta(days=1), f"hoy ({hoy.isoformat()})"
+
+    if "semana pasada" in m or "semana anterior" in m:
+        lunes = hoy - dt.timedelta(days=hoy.weekday() + 7)
+        return _rango_dias(lunes, lunes + dt.timedelta(days=6))
+
+    if "esta semana" in m:
+        return _rango_dias(hoy - dt.timedelta(days=hoy.weekday()), hoy)
 
     if "mes pasado" in m or "mes anterior" in m:
         primero_mes_actual = hoy.replace(day=1)
@@ -107,12 +266,13 @@ def _parsear_rango(mensaje: str, hoy: dt.date | None = None) -> tuple[dt.date, d
     if "año" in m or "anual" in m:
         return dt.date(hoy.year, 1, 1), hoy + dt.timedelta(days=1), f"{hoy.year} (a la fecha)"
 
-    if anio and not mes_encontrado:
+    if anio:
         return dt.date(anio, 1, 1), dt.date(anio + 1, 1, 1), f"el año {anio}"
 
     # default: mes en curso — el caso más común ("cómo vengo este mes")
     desde = hoy.replace(day=1)
     return desde, hoy + dt.timedelta(days=1), "este mes"
+
 
 
 # ── LA OTRA SUB-EMPRESA: PRUEBA (2026-09-07) ─────────────────────────────────
@@ -222,9 +382,45 @@ _NOMBRE_MES = ["", "ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep"
 
 _PATRON_RANKING = re.compile(
     r"qu[ée] vendedor|cu[áa]l vendedor|qui[ée]n (vendi[óo]|factur[óo])|"
-    r"mejor vendedor|ranking de vendedor|top de? vendedor|vendedores.{0,15}(m[áa]s|ranking)",
+    r"mejor vendedor|ranking de vendedor|top de? vendedor|vendedores.{0,15}(m[áa]s|ranking)|"
+    # "cuánto vendió cada vendedor en agosto" no matcheaba ninguno de los de
+    # arriba: caía al reporte propio y a un admin (vendedor_codigo=None) le
+    # contestaba la facturación de TODA la empresa, un número plausible que se
+    # lee como si fuera el desglose pedido. Mismo modo de falla que el nombre
+    # suelto (ver memoria 'ventas-chat-vendedor-nombre-suelto').
+    r"cada vendedor|por vendedor(?:es)?\b|vendedor por vendedor|"
+    r"todos? (?:los )?vendedores|de los vendedores|"
+    r"cu[áa]nto (?:vendi[óo]|factur[óo]|vendieron|facturaron) cada|"
+    r"cada uno de los vendedores|"
+    r"(?:discrimin|desglos|abiert|apertur)\w*\s+(?:por|de|entre)\s+vendedor",
     re.I,
 )
+
+# "en total" / "sumados" pide UN número; "cada uno" / "discriminado" pide la
+# lista. Se preguntan las dos cosas con las mismas palabras, así que el
+# ranking siempre cierra con el total al pie y sólo el pedido explícito de
+# total colapsa la respuesta a un número.
+_PATRON_TOTAL = re.compile(
+    r"\b(en total|el total|total(?:es)?|sumad[oa]s?|entre (?:los )?dos|"
+    r"entre todos|juntos|consolidado|global)\b", re.I,
+)
+_PATRON_DISCRIMINADO = re.compile(
+    r"cada vendedor|por vendedor|vendedor por vendedor|discrimin|desglos|"
+    r"abiert[oa] por|apertura|uno por uno|cada uno|separad[oa]s?", re.I,
+)
+_PATRON_TODOS = re.compile(r"\b(todos?|todas?|cada|complet[oa]|lista(?:do)?)\b", re.I)
+
+
+def _quiere_total(mensaje: str) -> bool:
+    """True sólo si pidió el total Y no pidió el detalle: "el total de Ortiz y
+    Beccaria" es un número, "el total de cada uno" son dos."""
+    m = mensaje or ""
+    return bool(_PATRON_TOTAL.search(m)) and not _PATRON_DISCRIMINADO.search(m)
+
+
+def _quiere_todos(mensaje: str) -> bool:
+    """"cada vendedor" / "todos los vendedores" → la lista completa, sin tope."""
+    return bool(_PATRON_TODOS.search(mensaje or ""))
 
 
 def _es_pedido_ranking(mensaje: str) -> bool:
@@ -235,11 +431,18 @@ def _es_pedido_ranking(mensaje: str) -> bool:
     return bool(_PATRON_RANKING.search(mensaje or ""))
 
 
-def _sql_ranking_vendedores(desde: dt.date, hasta_exclusivo: dt.date) -> str:
+def _sql_ranking_vendedores(
+    desde: dt.date, hasta_exclusivo: dt.date, codigos: list[int] | None = None
+) -> str:
     """Solo se llama para admins (ver responder_ventas) — sin filtro de
     vendedor, es justamente lo que se pide: comparar entre todos. Joinea
     contra el maestro `Vendedores` (MAGNUS_SITD.dbo, NO `Ped_Usu_Arma` — ver
-    memoria 'magnus-codigos-vendedor') para el nombre."""
+    memoria 'magnus-codigos-vendedor') para el nombre.
+
+    `codigos` (opcional) recorta a los vendedores que el usuario nombró:
+    "cuánto vendieron Gómez y Pérez". Son ints del maestro, no texto del
+    mensaje, así que interpolarlos es seguro."""
+    filtro = f" AND c.Vendedor IN ({_in_codigos(codigos)})" if codigos else ""
     magnus = f"""
 SELECT c.Vendedor AS VendedorCodigo, v.VendedorNombre,
   SUM(CASE WHEN c.CompCodigo IN (1,2,11) THEN c.Neto+c.NoGravado
@@ -248,7 +451,7 @@ SELECT c.Vendedor AS VendedorCodigo, v.VendedorNombre,
   COUNT(*) AS Comprobantes
 FROM Ven_CompCabecera c
 LEFT JOIN MAGNUS_SITD.dbo.Vendedores v ON v.VendedorCodigo = c.Vendedor
-WHERE c.FecMovim >= {_dias(desde)} AND c.FecMovim < {_dias(hasta_exclusivo)}
+WHERE c.FecMovim >= {_dias(desde)} AND c.FecMovim < {_dias(hasta_exclusivo)}{filtro}
 GROUP BY c.Vendedor, v.VendedorNombre
 """.strip()
     # El maestro `Vendedores` es compartido, así que el nombre es el mismo en
@@ -405,15 +608,26 @@ _MONTO_RENGLON = (
 )
 
 
+def _in_codigos(codigos: list[int]) -> str:
+    """Los códigos de vendedor salen del maestro de Magnus (los resolvió
+    `_detectar_vendedores_mencionados`), no del mensaje: son ints, no hay texto
+    del usuario en el SQL."""
+    return ",".join(str(int(c)) for c in codigos)
+
+
 def _in_niveles(niveles: list[int]) -> str:
     """Los códigos salen del catálogo de Magnus, no del mensaje: son ints del
     propio catálogo, así que no hay texto del usuario en el SQL."""
     return ",".join(str(int(n)) for n in niveles)
 
 
-def _sql_ranking_vendedores_linea(desde: dt.date, hasta_exclusivo: dt.date, niveles: list[int]) -> str:
+def _sql_ranking_vendedores_linea(
+    desde: dt.date, hasta_exclusivo: dt.date, niveles: list[int],
+    codigos: list[int] | None = None,
+) -> str:
     """Ranking entre vendedores acotado a una línea (solo admin, igual que
-    _sql_ranking_vendedores)."""
+    _sql_ranking_vendedores). `codigos` recorta a los nombrados."""
+    filtro = f" AND vc.Vendedor IN ({_in_codigos(codigos)})" if codigos else ""
     magnus = f"""
 SELECT vc.Vendedor AS VendedorCodigo, v.VendedorNombre,
   SUM({_MONTO_RENGLON}) AS Importe,
@@ -421,7 +635,7 @@ SELECT vc.Vendedor AS VendedorCodigo, v.VendedorNombre,
 {_SQL_JOIN_LINEA.strip()}
 LEFT JOIN MAGNUS_SITD.dbo.Vendedores v ON v.VendedorCodigo = vc.Vendedor
 WHERE vc.FecMovim >= {_dias(desde)} AND vc.FecMovim < {_dias(hasta_exclusivo)}
-  AND ap.Nivel1 IN ({_in_niveles(niveles)})
+  AND ap.Nivel1 IN ({_in_niveles(niveles)}){filtro}
 GROUP BY vc.Vendedor, v.VendedorNombre
 """.strip()
     return _dos_subempresas(
@@ -601,25 +815,40 @@ def _comps(n: int) -> str:
     return f"{n} comprobante" if n == 1 else f"{n} comprobantes"
 
 
-def _formatear_ranking(filas: list[dict], titulo: str, tope: int, sustantivo: str = "vendedores") -> str:
+def _formatear_ranking(
+    filas: list[dict], titulo: str, tope: int | None, sustantivo: str = "vendedores"
+) -> str:
     """Formateo en Python, no vía LLM (ver docstring del módulo): estos números
     los usa alguien para decidir, no pueden salir redondeados de cualquier
-    manera."""
+    manera.
+
+    `tope=None` lista a TODOS — es lo que corresponde cuando se pidió "cada
+    vendedor" o se nombró a un grupo. El total del período va siempre al pie:
+    la misma pregunta se hace de las dos formas ("discriminado" y "el total") y
+    así una sola respuesta sirve para las dos."""
     if not filas:
         return f"{titulo}: no encontré facturación."
     filas = [f for f in filas if f["importe"] != 0]
     filas.sort(key=lambda f: f["importe"], reverse=True)
     if not filas:
         return f"{titulo}: no encontré facturación."
+    mostradas = filas if tope is None else filas[:tope]
     out = [f"{titulo}:", ""]
-    for i, f in enumerate(filas[:tope], start=1):
+    for i, f in enumerate(mostradas, start=1):
         out.append(
             f"{i}. {f['nombre']} (cód. {f['codigo']}): {_monto(f['importe'])} "
             f"({f['comprobantes']} comp.)"
         )
-    if len(filas) > tope:
-        out.append(f"… y {len(filas) - tope} {sustantivo} más.")
+    if len(filas) > len(mostradas):
+        out.append(f"… y {len(filas) - len(mostradas)} {sustantivo} más.")
+    out.append("")
+    out.append(
+        f"Total de los {len(filas)} {sustantivo}: "
+        f"{_monto(sum(f['importe'] for f in filas))} "
+        f"({_comps(sum(f['comprobantes'] for f in filas))})."
+    )
     return "\n".join(out)
+
 
 
 # ── Gate 2: ¿el mensaje nombra a OTRO vendedor? ───────────────────────────────
@@ -650,8 +879,10 @@ _STOP_VENDEDOR = {
     "expo", "comercial", "ltda", "tamb",
 }
 
-_PATRON_VENDEDOR_CODIGO = re.compile(
-    r"\bvendedor(?:a)?\s*(?:codigo|cod\.?|nro\.?|n[°º]|numero)?\s*(\d{2,6})\b", re.I
+# "vendedor 797", "vendedor código 800", "los vendedores 797 y 800"
+_PATRON_VENDEDORES_CODIGOS = re.compile(
+    r"\bvendedor(?:a|es)?\s*(?:c[oó]digos?|cod\.?|nros?\.?|n[°º]|n[uú]meros?)?\s*"
+    r"(\d{2,6}(?:\s*(?:,|y|/|-|\s)\s*\d{2,6})*)", re.I
 )
 
 # Marcas de razón social: si aparecen, el mensaje está hablando de una EMPRESA,
@@ -712,13 +943,14 @@ def _partes_unicas(catalogo: list[tuple[int, str]]) -> set[str]:
     return {p for p, n in cuenta.items() if n == 1}
 
 
-def _detectar_vendedor_mencionado(
+def _detectar_vendedores_mencionados(
     mensaje: str, catalogo: list[tuple[int, str]]
-) -> tuple[int, str] | None:
-    """(codigo, nombre) del vendedor nombrado en el mensaje, o None.
+) -> list[tuple[int, str]]:
+    """TODOS los vendedores nombrados en el mensaje, sin repetidos, el de match
+    más fuerte primero.
 
-    Formas de nombrarlo:
-      · explícita — "vendedor 797" / "el vendedor código 800".
+    Formas de nombrarlos:
+      · explícita — "vendedor 797", "los vendedores 797 y 800".
       · dos partes del nombre del maestro — "BLANCO JULIO" ← "cuánto vendió
         Julio Blanco".
       · UNA parte inconfundible — "ubaldo vendió bulones?". Alcanza una sola
@@ -728,6 +960,10 @@ def _detectar_vendedor_mencionado(
         un admin recibía el total de TODA la empresa como si fuera de él.
       · UNA parte + la palabra "vendedor", para los nombres de una sola palabra.
 
+    Varios a la vez ("cuánto vendieron Gómez y Pérez en agosto") salen como
+    lista y el caller los compara en UNA consulta con `IN`, en vez de contestar
+    por uno solo y hacer pasar ese número por el de los dos.
+
     El riesgo de la parte suelta es al revés (negar de más, no mostrar de más):
     un apellido dentro de una razón social podría leerse como el vendedor. Se
     acota de dos maneras — la unicidad en el maestro, y `_PATRON_RAZON_SOCIAL`,
@@ -735,32 +971,34 @@ def _detectar_vendedor_mencionado(
     gate de cliente corre ANTES que éste, así que "cliente Ferretería Blanco"
     ni llega acá.
     """
-    m = _normalizar(mensaje)
-    por_codigo = _PATRON_VENDEDOR_CODIGO.search(mensaje or "")
+    por_codigo: dict[int, str] = {}
+    for g in _PATRON_VENDEDORES_CODIGOS.finditer(mensaje or ""):
+        for num in re.findall(r"\d{2,6}", g.group(1)):
+            cod = int(num)
+            por_codigo[cod] = next((n for c, n in catalogo if c == cod), f"vendedor {cod}")
     if por_codigo:
-        cod = int(por_codigo.group(1))
-        nombre = next((n for c, n in catalogo if c == cod), f"vendedor {cod}")
-        return cod, nombre
+        return sorted(por_codigo.items())
 
+    m = _normalizar(mensaje)
     tokens = set(re.findall(r"[a-z]{3,}", m))
     if not tokens:
-        return None
+        return []
     dice_vendedor = bool(re.search(r"\bvendedor(a|es)?\b", m))
     habla_de_empresa = bool(_PATRON_RAZON_SOCIAL.search(m))
     unicas = _partes_unicas(catalogo)
 
-    mejor: tuple[int, int, str] | None = None  # (partes_encontradas, codigo, nombre)
+    candidatos: list[tuple[set, int, str]] = []
     for codigo, nombre in catalogo:
         partes = _partes_nombre(nombre)
         if not partes:
             continue
-        encontradas = [p for p in partes if p in tokens]
+        encontradas = {p for p in partes if p in tokens}
         if not encontradas:
             continue
         if len(encontradas) >= 2:
             alcanza = True
         else:
-            p = encontradas[0]
+            p = next(iter(encontradas))
             # `len(partes) >= 2` = el registro parece una PERSONA. Sin esto,
             # "VIAJANTE ZONA ROSARIO" (791) queda reducido a "rosario" y
             # cualquiera que escriba "mi zona de rosario" se comería la
@@ -771,11 +1009,50 @@ def _detectar_vendedor_mencionado(
                  and (dice_vendedor or not habla_de_empresa))
                 or (dice_vendedor and len(partes) == 1)
             )
-        # Se prefiere el match de más partes: si el mensaje dice "Julio Blanco",
-        # gana el 797 (dos partes) sobre cualquier coincidencia de una sola.
-        if alcanza and (mejor is None or len(encontradas) > mejor[0]):
-            mejor = (len(encontradas), codigo, nombre)
-    return (mejor[1], mejor[2]) if mejor else None
+        if alcanza:
+            candidatos.append((encontradas, codigo, nombre))
+
+    # Un match que usa un subconjunto ESTRICTO de las palabras de otro es el
+    # mismo pedido visto peor: "Julio Blanco" identifica al 797 con dos partes,
+    # y un "BLANCO OTRO" que sólo matchea "blanco" sobra. Antes esto se
+    # resolvía quedándose con el de más partes; ahora hay que conservar a los
+    # demás, que pueden ser otra persona realmente nombrada.
+    salida = [
+        (len(tks), cod, nom) for tks, cod, nom in candidatos
+        if not any(tks < otras for otras, _, _ in candidatos)
+    ]
+    salida.sort(key=lambda r: (-r[0], r[1]))
+    return [(cod, nom) for _, cod, nom in salida]
+
+
+def _detectar_vendedor_mencionado(
+    mensaje: str, catalogo: list[tuple[int, str]]
+) -> tuple[int, str] | None:
+    """El vendedor nombrado (el match más fuerte) o None — la forma de un solo
+    resultado de `_detectar_vendedores_mencionados`."""
+    encontrados = _detectar_vendedores_mencionados(mensaje, catalogo)
+    return encontrados[0] if encontrados else None
+
+
+def _sin_nombres_vendedor(mensaje: str, vendedores: list[tuple[int, str]]) -> str:
+    """El mensaje sin las palabras del nombre del vendedor que ADEMÁS son un
+    mes ("Julio Blanco"), y sólo si queda otro mes en la frase.
+
+    Sin esto, "cuánto vendió Julio Blanco en agosto" se leía como julio: el
+    parser de rango ve "julio" antes que "agosto" y devuelve el mes equivocado
+    con el vendedor correcto — el peor tipo de error, un número plausible."""
+    del_nombre = {p for _, nombre in vendedores for p in _partes_nombre(nombre)} & set(MESES)
+    if not del_nombre:
+        return mensaje or ""
+    m = _normalizar(mensaje)
+    presentes = {n for n in MESES if re.search(rf"\b{n}\b", m)}
+    if not (presentes - del_nombre):
+        return mensaje or ""  # el único mes nombrado es el del nombre: se respeta
+    salida = mensaje or ""
+    for mes in del_nombre:
+        salida = re.sub(rf"\b{mes}\b", " ", salida, flags=re.I)
+    return salida
+
 
 
 # ── Gate 1: clientes, siempre dentro de la cartera ────────────────────────────
@@ -1172,6 +1449,74 @@ async def _responder_cliente(
     return "\n".join(out) + pie
 
 
+def _y(nombres: list[str]) -> str:
+    """"A, B y C" — para rotular un grupo de vendedores en el título."""
+    if len(nombres) <= 1:
+        return nombres[0] if nombres else ""
+    return ", ".join(nombres[:-1]) + " y " + nombres[-1]
+
+
+async def _responder_ranking(
+    desde: dt.date,
+    hasta: dt.date,
+    etiqueta: str,
+    codigos: list[int] | None,
+    lineas_pedidas: list[tuple[str, list[int]]],
+    tope: int | None,
+    titulo: str,
+) -> str:
+    """El desglose por vendedor: todos, o sólo `codigos` si el usuario nombró a
+    algunos. El recorte va en el SQL (`IN`), nunca filtrando en Python: con
+    varios meses de comprobantes traer todo para descartar sería un scan al
+    pedo (mismo criterio que el gate de cartera)."""
+    if lineas_pedidas:
+        tope_l = tope if (tope is None or len(lineas_pedidas) == 1) else 5
+        bloques = []
+        for etiqueta_linea, niveles in lineas_pedidas:
+            tsv = await _ejecutar_sql(
+                _sql_ranking_vendedores_linea(desde, hasta, niveles, codigos)
+            )
+            bloques.append(_formatear_ranking(
+                _parsear_tsv_ranking(tsv), f"{titulo} — {etiqueta_linea}, {etiqueta}", tope_l
+            ))
+        bloques.append(_PIE_LINEA)
+        return "\n\n".join(bloques)
+
+    tsv = await _ejecutar_sql(_sql_ranking_vendedores(desde, hasta, codigos))
+    return _formatear_ranking(_parsear_tsv_ranking(tsv), f"{titulo}, {etiqueta}", tope)
+
+
+async def _total_conjunto(
+    desde: dt.date,
+    hasta: dt.date,
+    etiqueta: str,
+    vendedores: list[tuple[int, str]],
+    lineas_pedidas: list[tuple[str, list[int]]],
+) -> str:
+    """Los vendedores nombrados SUMADOS ("cuánto vendieron Gómez y Pérez en
+    total"). Es la misma consulta recortada del desglose, agregada en Python
+    sobre las pocas filas que vuelven — no hace falta ir de nuevo a Magnus."""
+    codigos = [c for c, _ in vendedores]
+    detalle = None
+    if lineas_pedidas:
+        detalle, niveles = lineas_pedidas[0]
+        tsv = await _ejecutar_sql(_sql_ranking_vendedores_linea(desde, hasta, niveles, codigos))
+    else:
+        tsv = await _ejecutar_sql(_sql_ranking_vendedores(desde, hasta, codigos))
+    filas = _parsear_tsv_ranking(tsv)
+    quien = _y([n for _, n in vendedores])
+    if detalle:
+        quien = f"{quien}, línea {detalle}"
+    if not filas:
+        return f"No encontré facturación de {quien} en {etiqueta}."
+    pie = f"\n\n{_PIE_LINEA}" if detalle else ""
+    return (
+        f"Facturación de {quien} en {etiqueta}, los {len(codigos)} sumados: "
+        f"{_monto(sum(f['importe'] for f in filas))} "
+        f"({_comps(sum(f['comprobantes'] for f in filas))}).{pie}"
+    )
+
+
 async def responder_ventas(mensaje: str, vendedor_codigo: int | None, es_admin: bool) -> str:
     """Punto de entrada del intent "ventas". `vendedor_codigo` ya viene
     resuelto y validado por el caller (nodes.py) — ver el docstring del
@@ -1189,6 +1534,9 @@ async def responder_ventas(mensaje: str, vendedor_codigo: int | None, es_admin: 
     # Sólo se completa cuando un ADMIN pide explícitamente por un vendedor:
     # cambia el "tu cartera" de la respuesta por el nombre de esa persona.
     etiqueta_vendedor: str | None = None
+    # Varios vendedores nombrados en el mismo mensaje → comparación entre
+    # ellos (no el reporte de uno), recortada con IN en el SQL.
+    vendedores_pedidos: list[tuple[int, str]] = []
 
     # ¿Nombró alguna línea de producto? (bulones, mangueras, …). Si el catálogo
     # no se puede leer, se sigue sin corte por línea en vez de fallar: es mejor
@@ -1239,62 +1587,72 @@ async def responder_ventas(mensaje: str, vendedor_codigo: int | None, es_admin: 
         )
 
     else:
-        # ── GATE 2: ¿nombró a otro vendedor? ─────────────────────────────────
+        # ── GATE 2: ¿nombró a otro vendedor, o a varios? ─────────────────────
         # Un no-admin no puede ver a nadie más, ni siquiera preguntando por el
-        # nombre en vez de pedir el ranking. Un admin sí: se usa como filtro.
+        # nombre en vez de pedir el ranking. Un admin sí: uno solo se usa como
+        # filtro; dos o más son una comparación entre ellos, que sale por el
+        # mismo camino que el ranking pero recortada con IN.
         try:
-            mencionado = _detectar_vendedor_mencionado(mensaje, await _catalogo_vendedores())
+            mencionados = _detectar_vendedores_mencionados(mensaje, await _catalogo_vendedores())
         except _FalloMagnus:
             return _MSG_FALLO_MAGNUS
         except Exception:
             log.exception("no pude leer el maestro de vendedores")
-            mencionado = None
+            mencionados = []
 
-        if mencionado and mencionado[0] != vendedor_codigo:
+        ajenos = [v for v in mencionados if v[0] != vendedor_codigo]
+        if ajenos:
             if not es_admin:
                 log.warning(
                     f"[VENTAS] vendedor {vendedor_codigo} pidió datos de "
-                    f"{mencionado[0]} ({mencionado[1]}) — denegado"
+                    + ", ".join(f"{c} ({n})" for c, n in ajenos) + " — denegado"
                 )
                 return _MSG_OTRO_VENDEDOR
-            # admin: la consulta pasa a ser sobre ESE vendedor
-            vendedor_codigo = mencionado[0]
-            etiqueta_vendedor = f"{mencionado[1]} (cód. {mencionado[0]})"
-            log.info(f"[VENTAS] admin consulta al vendedor {mencionado[0]} ({mencionado[1]})")
+            if len(mencionados) > 1:
+                # varios: comparación entre ellos, no el reporte de uno
+                vendedores_pedidos = mencionados
+                log.info(f"[VENTAS] admin compara vendedores {[c for c, _ in mencionados]}")
+            else:
+                # admin: la consulta pasa a ser sobre ESE vendedor
+                vendedor_codigo = mencionados[0][0]
+                etiqueta_vendedor = f"{mencionados[0][1]} (cód. {mencionados[0][0]})"
+                log.info(f"[VENTAS] admin consulta al vendedor {mencionados[0][0]}")
 
-    # Ranking ENTRE vendedores ("qué vendedor vendió más"): solo admin — ver
-    # docstring del módulo. Un no-admin que lo pida no se queda sin respuesta:
-    # se le aclara el motivo y se le ofrece su propio dato en su lugar.
-    if _es_pedido_ranking(mensaje):
+        # El nombre puede ser también un mes ("Julio Blanco"): se relee el
+        # rango sin esa palabra — ver `_sin_nombres_vendedor`.
+        if mencionados:
+            limpio = _sin_nombres_vendedor(mensaje, mencionados)
+            if limpio != (mensaje or ""):
+                desde, hasta, etiqueta = _parsear_rango(limpio)
+
+    # Comparación ENTRE vendedores: el ranking pedido explícitamente ("qué
+    # vendedor vendió más", "cuánto vendió cada vendedor", "por vendedor") o
+    # varios nombrados en el mismo mensaje. Solo admin — ver docstring del
+    # módulo. Un no-admin que lo pida no se queda sin respuesta: se le aclara
+    # el motivo y se le ofrece su propio dato en su lugar.
+    if vendedores_pedidos or _es_pedido_ranking(mensaje):
         if not es_admin:
             return (
                 "Ese dato es de toda la empresa y no te lo puedo mostrar — "
                 "solo puedo darte TU propia facturación. Preguntame, por "
-                f"ejemplo, \"cómo vengo {'' if etiqueta.split()[0] in ('este', 'el', 'hoy') else 'en '}{etiqueta}\"."
+                f"ejemplo, \"cómo vengo {'' if etiqueta.split()[0] in ('este', 'el', 'hoy', 'los') else 'en '}{etiqueta}\"."
             )
-        # Acotado a una o varias líneas ("quién vendió más en bulones y en
-        # mangueras") — un ranking por cada una.
-        if lineas_pedidas:
-            bloques = []
-            tope = 10 if len(lineas_pedidas) == 1 else 5
-            for etiqueta_linea, niveles in lineas_pedidas:
-                try:
-                    tsv = await _ejecutar_sql(_sql_ranking_vendedores_linea(desde, hasta, niveles))
-                except _FalloMagnus:
-                    return _MSG_FALLO_MAGNUS
-                bloques.append(
-                    _formatear_ranking(
-                        _parsear_tsv_ranking(tsv), f"{etiqueta_linea} — {etiqueta}", tope
-                    )
-                )
-            bloques.append(_PIE_LINEA)
-            return "\n\n".join(bloques)
-
+        codigos = [c for c, _ in vendedores_pedidos] or None
+        titulo = (_y([n for _, n in vendedores_pedidos]) if vendedores_pedidos
+                  else "Ranking de vendedores")
         try:
-            tsv = await _ejecutar_sql(_sql_ranking_vendedores(desde, hasta))
+            # "…en total" colapsa a un número; si no, la lista, que ya trae el
+            # total al pie y responde las dos formas de la misma pregunta.
+            if codigos and _quiere_total(mensaje):
+                return await _total_conjunto(desde, hasta, etiqueta, vendedores_pedidos, lineas_pedidas)
+            # Sin tope cuando se pidió "cada/todos" o cuando la lista son los
+            # que nombró el usuario; si no, los 15 primeros.
+            tope = None if (codigos or _quiere_todos(mensaje)) else 15
+            return await _responder_ranking(
+                desde, hasta, etiqueta, codigos, lineas_pedidas, tope, titulo
+            )
         except _FalloMagnus:
             return _MSG_FALLO_MAGNUS
-        return _formatear_ranking(_parsear_tsv_ranking(tsv), f"Ranking de vendedores, {etiqueta}", 15)
 
     if lineas_pedidas:
         # "cómo vengo en bulones": mismo reporte mensual pero por línea. El

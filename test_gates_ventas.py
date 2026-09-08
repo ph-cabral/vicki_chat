@@ -4,7 +4,7 @@ Correr desde cualquier lado: `python vicki_chat/test_gates_ventas.py`. Las
 rutas salen de __file__ — antes estaban hardcodeadas a una sesión vieja y el
 archivo no corría en otra máquina.
 """
-import os, sys, types, asyncio, datetime as dt
+import os, re, sys, types, asyncio, datetime as dt
 
 _AQUI = os.path.dirname(os.path.abspath(__file__))
 
@@ -117,6 +117,65 @@ check("cartera mira MAGNUS y PRUEBA",
 check("los maestros compartidos quedan intactos",
       all("PRU_MAGNUS_SITD" not in s and "PRU_StkFer" not in s for s in _todas.values()), True)
 
+
+print("\n=== _parsear_rango: meses, rangos y ventanas ===")
+HOY = dt.date(2026, 9, 8)
+casos_rango = [
+    ("cuanto vendio cada vendedor en agosto",
+     (dt.date(2026, 8, 1), dt.date(2026, 9, 1), "agosto 2026")),
+    ("cuanto vendimos del 1 al 15 de agosto",
+     (dt.date(2026, 8, 1), dt.date(2026, 8, 16), "el período 01/08/2026 – 15/08/2026")),
+    ("entre el 1/8 y el 15/8/2026",
+     (dt.date(2026, 8, 1), dt.date(2026, 8, 16), "el período 01/08/2026 – 15/08/2026")),
+    ("del 5 de julio al 20 de agosto",
+     (dt.date(2026, 7, 5), dt.date(2026, 8, 21), "el período 05/07/2026 – 20/08/2026")),
+    ("ventas de enero a agosto",
+     (dt.date(2026, 1, 1), dt.date(2026, 9, 1), "el período enero–agosto 2026")),
+    ("cuanto vendimos el 15 de agosto",
+     (dt.date(2026, 8, 15), dt.date(2026, 8, 16), "el 15/08/2026")),
+    ("ventas de los ultimos 30 dias",
+     (dt.date(2026, 8, 10), dt.date(2026, 9, 9), "los últimos 30 días")),
+    ("como vengo en los ultimos 3 meses",
+     (dt.date(2026, 7, 1), dt.date(2026, 9, 9), "los últimos 3 meses")),
+    ("el primer trimestre de 2025",
+     (dt.date(2025, 1, 1), dt.date(2025, 4, 1), "el 1º trimestre de 2025")),
+    ("el segundo semestre",
+     (dt.date(2026, 7, 1), dt.date(2027, 1, 1), "el 2º semestre de 2026")),
+    # los que ya andaban, para que el agregado no los pise
+    ("como vengo este mes", (dt.date(2026, 9, 1), dt.date(2026, 9, 9), "este mes")),
+    ("cuanto vendi el mes pasado", (dt.date(2026, 8, 1), dt.date(2026, 9, 1), "el mes pasado")),
+    ("facturacion de agosto 2025", (dt.date(2025, 8, 1), dt.date(2025, 9, 1), "agosto 2025")),
+    ("cuanto vendimos ayer", (dt.date(2026, 9, 7), dt.date(2026, 9, 8), "el 07/09/2026")),
+]
+for msg, want in casos_rango:
+    check(msg, vt._parsear_rango(msg, HOY), want)
+
+print("\n=== _es_pedido_ranking ===")
+casos_rk = [
+    ("cuanto vendio cada vendedor en agosto", True),
+    ("facturacion por vendedor de agosto", True),
+    ("dame el detalle discriminado por vendedor", True),
+    ("todos los vendedores de agosto", True),
+    ("que vendedor vendio mas", True),
+    ("como vengo este mes", False),
+    ("cuanto facture en agosto", False),
+    ("cuanto le vendi al cliente Rossi", False),
+]
+for msg, want in casos_rk:
+    check(msg, vt._es_pedido_ranking(msg), want)
+
+print("\n=== varios vendedores nombrados ===")
+casos_vv = [
+    ("cuanto vendieron maria perez y gomez carlos en agosto",
+     [(800, "PEREZ MARIA"), (814, "GOMEZ CARLOS")]),
+    ("ventas de los vendedores 797 y 800",
+     [(797, "BLANCO JULIO"), (800, "PEREZ MARIA")]),
+    ("cuanto vendio Julio Blanco en agosto", [(797, "BLANCO JULIO")]),
+    ("como vengo este mes", []),
+]
+for msg, want in casos_vv:
+    check(msg, vt._detectar_vendedores_mencionados(msg, VEND), want)
+
 print("\n=== gates de responder_ventas (magnus mockeado) ===")
 class Mock:
     def __init__(self): self.sqls = []
@@ -126,6 +185,18 @@ class Mock:
             return "VendedorCodigo\tnombre\n" + "\n".join(f"{c}\t{n}" for c, n in VEND) + "\n(5 filas)"
         if "FROM Stk_Nivel1" in sql:
             return "Nivel1\tDetalle\n1\tBULONERÍA\n(1 filas)"
+        if "MAX(VendedorNombre)" in sql:              # desglose por vendedor
+            filas = [(797, "BLANCO JULIO", 3000, 5), (814, "GOMEZ CARLOS", 2000, 4),
+                     (800, "PEREZ MARIA", 1000, 2)]
+            # el mock respeta el recorte del SQL: si no, el total del grupo
+            # daría igual que el de todos y el test no probaría nada
+            g = re.search(r"Vendedor IN \(([\d,]+)\)", sql)
+            if g:
+                cods = {int(x) for x in g.group(1).split(",")}
+                filas = [f for f in filas if f[0] in cods]
+            return ("VendedorCodigo\tVendedorNombre\tImporte\tComprobantes\n"
+                    + "\n".join("\t".join(str(x) for x in f) for f in filas)
+                    + f"\n({len(filas)} filas)")
         if "TOP 5 c.CodCliente" in sql:              # búsqueda en cartera
             return "CodCliente\tNombre\n(0 filas)"
         if "TOP 3 LTRIM" in sql:                     # existe fuera de la cartera
@@ -176,6 +247,52 @@ async def main():
     m.sqls.clear()
     r = await vt.responder_ventas("ubaldo ha vendido buloneria?", 800, False)
     check("no-admin no puede preguntar por ubaldo", r, vt._MSG_OTRO_VENDEDOR)
+
+    # ── desglose por vendedor ────────────────────────────────────────────────
+    # "cuanto vendio cada vendedor en agosto" no matcheaba el patrón de ranking
+    # y caía al reporte propio: a un admin le contestaba la facturación de TODA
+    # la empresa (un número plausible que se lee como el desglose pedido).
+    m.sqls.clear()
+    r = await vt.responder_ventas("cuanto vendio cada vendedor en agosto", None, True)
+    check("cada vendedor = desglose",
+          all(n in r for n in ("BLANCO JULIO", "GOMEZ CARLOS", "PEREZ MARIA")), True)
+    check("no contesta por toda la empresa", "toda la empresa" in r, False)
+    check("el desglose cierra con el total", "Total de los 3 vendedores: $6.000" in r, True)
+    check("una sola consulta", sum(1 for s in m.sqls if "MAX(VendedorNombre)" in s), 1)
+    check("agosto completo",
+          any(f"FecMovim >= {vt._dias(dt.date(2026, 8, 1))}" in s
+              and f"FecMovim < {vt._dias(dt.date(2026, 9, 1))}" in s for s in m.sqls), True)
+
+    m.sqls.clear()
+    r = await vt.responder_ventas("cuanto vendio cada vendedor en agosto", 800, False)
+    check("desglose vedado al no-admin", "no te lo puedo mostrar" in r, True)
+
+    # varios vendedores nombrados + rango de días
+    m.sqls.clear()
+    r = await vt.responder_ventas(
+        "cuanto vendieron maria perez y gomez carlos del 1 al 15 de agosto", None, True)
+    check("recorte a los dos nombrados",
+          any("c.Vendedor IN (800,814)" in s for s in m.sqls), True)
+    check("rango de días en el WHERE",
+          any(f"FecMovim >= {vt._dias(dt.date(2026, 8, 1))}" in s
+              and f"FecMovim < {vt._dias(dt.date(2026, 8, 16))}" in s for s in m.sqls), True)
+    check("los dos en el título", "PEREZ MARIA y GOMEZ CARLOS" in r, True)
+
+    m.sqls.clear()
+    r = await vt.responder_ventas(
+        "cuanto vendieron maria perez y gomez carlos en agosto en total", None, True)
+    check("total del grupo", "sumados: $3.000" in r, True)
+
+    m.sqls.clear()
+    r = await vt.responder_ventas(
+        "cuanto vendieron maria perez y gomez carlos en agosto", 800, False)
+    check("grupo vedado al no-admin", r, vt._MSG_OTRO_VENDEDOR)
+
+    # el nombre que también es un mes: el rango tiene que ser agosto, no julio
+    m.sqls.clear()
+    r = await vt.responder_ventas("cuanto vendio Julio Blanco en agosto", None, True)
+    check("Julio Blanco en agosto no es julio",
+          any(f"FecMovim >= {vt._dias(dt.date(2026, 8, 1))}" in s for s in m.sqls), True)
 
     check("singular de comprobante", vt._comps(1), "1 comprobante")
     check("plural de comprobante", vt._comps(2), "2 comprobantes")
