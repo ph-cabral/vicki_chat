@@ -38,3 +38,8 @@ class AgentState(TypedDict):
     # /compras ve por el chat lo mismo que ve por la vista. Lo resuelve
     # vicki_web contra la cookie de sesión — ver lib/compras/vickiComprasAcceso.ts.
     compras_habilitado: Optional[bool]
+    # ── Intent "deposito" — ver app/deposito_tools.py ───────────────────────
+    # Todo o nada, sin filtro por persona: el que puede entrar a la vista
+    # /deposito ve por el chat lo mismo que ve por la vista. Lo resuelve
+    # vicki_web contra la cookie de sesión — ver lib/deposito/vickiDepositoAcceso.ts.
+    deposito_habilitado: Optional[bool]

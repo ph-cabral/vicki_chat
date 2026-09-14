@@ -472,6 +472,31 @@ async def compras_node(state: AgentState) -> AgentState:
     return {**state, "messages": state["messages"] + [response], "final_response": texto}
 
 
+async def deposito_node(state: AgentState) -> AgentState:
+    """Intent "deposito": productividad del mes, por preparador (WMS) y por
+    mesa de control (EVERWEAR). Mismo patrón que compras_node — el permiso
+    llega resuelto por vicki_web contra la sesión (ver
+    lib/deposito/vickiDepositoAcceso.ts) y la respuesta sale ya formateada de
+    app/deposito_tools.py, sin pasar por el LLM.
+
+    Todo o nada, igual que compras: si podés entrar a la vista /deposito, el
+    chat te contesta lo mismo que ya ves ahí (no hay filtro por persona — acá
+    no existe un "operario logueado" que recorte la vista)."""
+    from app.deposito_tools import responder_deposito
+
+    if not state.get("deposito_habilitado"):
+        texto = (
+            "No tenés acceso a los datos de depósito. Se habilita con el "
+            "permiso de la vista Depósito — pedíselo a un administrador. (Si "
+            "te lo acaban de dar, cerrá sesión y volvé a entrar.)"
+        )
+    else:
+        texto = await responder_deposito(state["user_message"])
+
+    response = AIMessage(content=texto)
+    return {**state, "messages": state["messages"] + [response], "final_response": texto}
+
+
 def camera_node(state):
     try:
         take_camera_snapshot()  # escribe el JPG en SNAPSHOT_PATH (servido por /snapshot)

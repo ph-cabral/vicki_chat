@@ -11,6 +11,7 @@ from app.nodes import (
     rrhh_node,
     ventas_node,
     compras_node,
+    deposito_node,
 )
 
 
@@ -24,6 +25,8 @@ def route_after_classification(state):
         return "rrhh"
     if intent == "compras":
         return "compras"
+    if intent == "deposito":
+        return "deposito"
     if intent in ("search", "ranking", "procedimiento"):
         return "rag_search"
     return "general"
@@ -39,6 +42,7 @@ def build_graph():
     builder.add_node("ventas", ventas_node)
     builder.add_node("rrhh", rrhh_node)
     builder.add_node("compras", compras_node)
+    builder.add_node("deposito", deposito_node)
     builder.set_entry_point("router")
     builder.add_conditional_edges(
         "router",
@@ -50,6 +54,7 @@ def build_graph():
             "ventas": "ventas",
             "rrhh": "rrhh",
             "compras": "compras",
+            "deposito": "deposito",
         },
     )
     builder.add_edge("rag_search", "response")
@@ -59,4 +64,5 @@ def build_graph():
     builder.add_edge("ventas", END)
     builder.add_edge("rrhh", END)
     builder.add_edge("compras", END)
+    builder.add_edge("deposito", END)
     return builder

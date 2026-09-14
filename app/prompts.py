@@ -73,7 +73,7 @@ Contexto reciente de la conversación (para interpretar referencias como
 {history}
 
 Clasificá el ÚLTIMO mensaje del usuario y devolvé SOLO un JSON válido, sin texto extra:
-{{"intent": "<search|ranking|procedimiento|ventas|rrhh|compras|camera|general>", "query": "..."}}
+{{"intent": "<search|ranking|procedimiento|ventas|rrhh|compras|deposito|camera|general>", "query": "..."}}
 
 Reglas:
 - "search": pide/busca candidatos o perfiles para un puesto.
@@ -121,8 +121,19 @@ Reglas:
   de stock y lo que se compró para reponerlo, no lo facturado. Y si preguntan
   por un procedimiento de compras ("cómo se carga una OC"), eso es
   "procedimiento".
+- "deposito": pregunta por PRODUCTIVIDAD o cantidad de ítems de depósito en un
+  período — "productividad de los preparadores en agosto", "cuántos ítems
+  preparó cada operario", "total de ítems por mesa de control", "cuánto
+  pickeó Fulano", "cómo viene la mesa de control este mes". Cubre las DOS
+  cosas por separado: preparadores/operarios de picking, y mesa(s) de
+  control/controladores. Si no tiene permiso, igual clasificalo así — la
+  negativa la da el nodo, no vos. NUNCA respondas vos con cifras de
+  productividad ni de ítems: no las tenés, salen de Magnus (WMS + EVERWEAR).
+  OJO, no confundir con "procedimiento": "instructivo de picking" o "cómo se
+  arma un pedido" es "procedimiento" (una guía, no un número); "cuánto
+  pickeó" o "productividad de picking" es "deposito" (un número real).
 - "camera": pide una foto/snapshot de una cámara o reloj.
-- "general": saludo, charla, dudas o cualquier cosa que NO sea búsqueda de perfiles, procedimientos, ventas propias, asistencia ni compras.
+- "general": saludo, charla, dudas o cualquier cosa que NO sea búsqueda de perfiles, procedimientos, ventas propias, asistencia, compras ni productividad de depósito.
 - "query": para search/ranking/procedimiento. Reformulá el pedido como una búsqueda
   AUTOCONTENIDA (standalone), incorporando el puesto/skills/zona que ya se
   hablaron en la conversación si el último mensaje es una referencia o un

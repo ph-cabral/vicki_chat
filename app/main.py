@@ -172,6 +172,11 @@ class ChatRequest(BaseModel):
     # (lib/compras/vickiComprasAcceso.ts). Este backend no lo revalida. Default
     # False: un request viejo que no lo mande no ve nada de compras.
     vicki_compras_habilitado: bool = False
+    # Acceso a datos de depósito (intent "deposito"): el permiso es el de la
+    # VISTA /deposito, resuelto por vicki_web contra la cookie de sesión
+    # (lib/deposito/vickiDepositoAcceso.ts). Este backend no lo revalida.
+    # Default False: un request viejo que no lo mande no ve nada de depósito.
+    vicki_deposito_habilitado: bool = False
 
 
 class ChatResponse(BaseModel):
@@ -604,6 +609,8 @@ async def chat(request: ChatRequest):
             "rrhh_habilitado": request.vicki_rrhh_habilitado,
             # intent "compras" — ver app/compras_tools.py
             "compras_habilitado": request.vicki_compras_habilitado,
+            # intent "deposito" — ver app/deposito_tools.py
+            "deposito_habilitado": request.vicki_deposito_habilitado,
         }
 
         result = await graph.ainvoke(initial_state, config=graph_config)

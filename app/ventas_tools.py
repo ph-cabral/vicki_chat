@@ -748,7 +748,7 @@ class _FalloMagnus(Exception):
     tenga que repetir el mismo try/except en cada report."""
 
 
-def _ejecutar_sql_http(sql: str) -> str:
+def _ejecutar_sql_http(sql: str, db: str = "EVERWEAR") -> str:
     """POST /sql al servicio de magnus (endpoint JSON plano, sin MCP).
 
     Es el camino preferido desde 2026-09-06: el transporte streamable-http del
@@ -756,7 +756,11 @@ def _ejecutar_sql_http(sql: str) -> str:
     contra 127.0.0.1 — no es red), así que el mismo server.py expone las
     consultas como JSON usando http.server de la stdlib. Sincrónico a
     propósito: lo llama _ejecutar_sql con asyncio.to_thread, y `requests` ya
-    era dependencia. Ver mcp-magnus/README.md "Modo endpoint HTTP"."""
+    era dependencia. Ver mcp-magnus/README.md "Modo endpoint HTTP".
+
+    `db`: "EVERWEAR" (ERP Magnus, default — ventas/compras/rrhh) o "WMS"
+    (depósito/picking — ver app/deposito_tools.py). mcp-magnus ya expone las
+    dos (MSSQL_DBS=EVERWEAR,WMS en su .env); acá solo se reenvía el nombre."""
     import requests
 
     headers = {"Content-Type": "application/json"}
@@ -764,7 +768,7 @@ def _ejecutar_sql_http(sql: str) -> str:
         headers["X-Api-Token"] = config.MAGNUS_API_TOKEN
     r = requests.post(
         config.MAGNUS_SQL_URL,
-        json={"sql": sql, "db": "EVERWEAR", "max_rows": 60},
+        json={"sql": sql, "db": db, "max_rows": 60},
         headers=headers,
         timeout=config.MAGNUS_MCP_TIMEOUT,
     )
@@ -780,20 +784,24 @@ def _ejecutar_sql_http(sql: str) -> str:
     return data["tsv"]
 
 
-async def _ejecutar_sql(sql: str) -> str:
+async def _ejecutar_sql(sql: str, db: str = "EVERWEAR") -> str:
     """Corre `sql` contra magnus con timeout duro (config.MAGNUS_MCP_TIMEOUT).
 
     Sin este timeout, si el servicio de red no contesta (firewall cerrado,
     la PC/VM Windows apagada, IP mal puesta) el pedido queda colgado hasta que
     lo aborta el FRONT — 60s en vicki_web — dejando al usuario 60 segundos
     esperando y sin un mensaje claro de qué pasó. Acá cortamos antes y
-    devolvemos un error entendible."""
+    devolvemos un error entendible.
+
+    `db`: ver _ejecutar_sql_http — "EVERWEAR" (default) o "WMS". Por el camino
+    MCP viejo (sin MAGNUS_SQL_URL) también se reenvía: mcp-magnus expone el
+    mismo parámetro por los 3 transportes."""
     try:
         async def _llamar():
             if config.MAGNUS_SQL_URL:
-                return await asyncio.to_thread(_ejecutar_sql_http, sql)
+                return await asyncio.to_thread(_ejecutar_sql_http, sql, db)
             tool = await _get_query_tool()
-            return await tool.ainvoke({"sql": sql, "db": "EVERWEAR", "max_rows": 60})
+            return await tool.ainvoke({"sql": sql, "db": db, "max_rows": 60})
 
         return await asyncio.wait_for(_llamar(), timeout=config.MAGNUS_MCP_TIMEOUT)
     except asyncio.TimeoutError as e:
