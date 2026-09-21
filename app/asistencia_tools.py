@@ -46,6 +46,7 @@ un motivo mal interpretado da un número mal calculado sin que nadie lo note):
 import datetime as dt
 import logging
 import re
+from difflib import SequenceMatcher
 
 from app.config import config
 # Un solo parser de fechas para todo el chat: si "el mes pasado" cambia de
@@ -278,9 +279,34 @@ _PATRON_FERIADOS = re.compile(r"feriad", re.I)
 _PATRON_EXTRAS = re.compile(r"horas?\s+extra|hs\.?\s*extra|extras?\b", re.I)
 _PATRON_FALTAS = re.compile(
     r"falt[oó]|falt[eé]|faltas|ausen|inasisten|no vino|no fue a trabajar|"
+    r"no se present|no asisti|no concurri|no trabaj[oó]|"
     r"d[ií]as? (?:no )?trabajad|vacacion|licencia|enfermedad|carpeta",
     re.I,
 )
+
+# Palabras en mayúscula que NO son personas: son áreas o sectores. Sin esto, un
+# "¿cuántas faltas hubo en Depósito?" se leía como un nombre mal escrito.
+_AREAS = {
+    "deposito", "produccion", "administracion", "ventas", "compras", "fabrica",
+    "planta", "rrhh", "mesa", "control", "logistica", "mantenimiento", "taller",
+    "expedicion", "oficina", "sistemas", "calidad", "everwear", "vicki",
+}
+
+
+def _posible_persona(mensaje: str) -> str | None:
+    """Palabra con mayúscula que parece un nombre propio, para distinguir «no
+    reconocí a quién nombraste» de «no nombraste a nadie».
+
+    Antes las dos terminaban en el panorama general de toda la empresa: se
+    preguntó por los días de una persona y volvió el total de 73 personas, que
+    parece una respuesta pero no lo es."""
+    palabras = re.findall(r"\b[A-ZÁÉÍÓÚÑ][a-záéíóúñ]{2,}\b", mensaje or "")
+    for w in palabras[1:] if len(palabras) > 1 else palabras:
+        n = _normalizar(w)
+        if n in _STOP_PERSONA or n in _AREAS or n in _NOMBRE_MES:
+            continue
+        return w
+    return None
 
 def _hasta_inclusivo(hasta_exclusivo: dt.date, hoy: dt.date) -> dt.date:
     """`_parsear_rango` devuelve `hasta` exclusivo; acá los días se generan con
@@ -341,6 +367,24 @@ def _partes_unicas(catalogo: list[tuple[str, str]]) -> set[str]:
     return {p for p, n in cuenta.items() if n == 1}
 
 
+def _parecido(parte: str, tokens: set[str]) -> bool:
+    """¿Alguno de los tokens del mensaje es el mismo apellido mal tipeado?
+
+    El nombre se escribe de oído: se preguntó por "Ignacio martinella" y el
+    legajo dice "Martinelli Jose Ignacio", así que no matcheaba nada y la
+    respuesta salió por el panorama general. Se exige 5+ letras y una
+    similitud alta para no confundir apellidos parecidos entre sí.
+    """
+    if len(parte) < 5:
+        return False
+    for t in tokens:
+        if len(t) < 5 or abs(len(t) - len(parte)) > 2:
+            continue
+        if t[0] == parte[0] and SequenceMatcher(None, t, parte).ratio() >= 0.85:
+            return True
+    return False
+
+
 def _detectar_personas(mensaje: str, catalogo: list[tuple[str, str]]) -> list[tuple[str, str]]:
     """Empleados nombrados en el mensaje → [(employee_no, nombre), ...].
 
@@ -358,7 +402,7 @@ def _detectar_personas(mensaje: str, catalogo: list[tuple[str, str]]) -> list[tu
         partes = _partes_nombre(nombre)
         if not partes:
             continue
-        hits = [p for p in partes if p in tokens]
+        hits = [p for p in partes if p in tokens or _parecido(p, tokens)]
         if len(hits) >= 2 or (len(hits) == 1 and len(hits[0]) >= 4 and hits[0] in unicas):
             encontrados.append((len(hits), emp_no, nombre))
     encontrados.sort(key=lambda x: -x[0])
@@ -644,6 +688,19 @@ async def responder_rrhh(mensaje: str) -> str:
         # pregunta; y la persona nombrada gana sobre el ranking general.
         if _PATRON_FERIADOS.search(mensaje) and not personas:
             return await _reporte_feriados(d1, d2, etiqueta)
+
+        # Nombró a alguien y no lo reconocimos: decirlo. Antes se contestaba
+        # igual con el panorama de toda la empresa, que parece una respuesta
+        # pero no lo es — se preguntó por los días de una persona y volvieron
+        # las horas de las 73.
+        if not personas:
+            posible = _posible_persona(mensaje)
+            if posible and (_PATRON_FALTAS.search(mensaje) or _PATRON_EXTRAS.search(mensaje)):
+                return (
+                    f"No encontré a «{posible}» entre los legajos activos, así que "
+                    f"no puedo darte sus días. Revisá cómo se escribe el apellido, "
+                    f"o pedime el panorama de {etiqueta} para toda la empresa."
+                )
 
         if _PATRON_EXTRAS.search(mensaje):
             return await _reporte_extras(d1, d2, etiqueta, personas)

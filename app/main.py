@@ -17,7 +17,13 @@ from pydantic import BaseModel
 from app import cv_files
 from app.config import config
 from app.graph import build_graph
-from app.summary import load_context, strip_b64, update_summary
+from app.summary import (
+    inicio_conversacion,
+    load_context,
+    marcar_conversacion_nueva,
+    strip_b64,
+    update_summary,
+)
 from app.tool import (
     LOCATIONS,
     SNAPSHOT_PATH,
@@ -90,6 +96,18 @@ async def lifespan(_app: FastAPI):
                 updated_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
+        # Arranque de la conversación en curso — ver summary.inicio_conversacion.
+        await db_pool.execute(
+            "ALTER TABLE agent.chat_summary "
+            "ADD COLUMN IF NOT EXISTS conversacion_desde TIMESTAMPTZ"
+        )
+        # El historial se lee SIEMPRE por (session_id, created_at DESC): con el
+        # índice viejo (session_id, user_id) había que traer todos los mensajes
+        # de la sesión y ordenarlos en cada mensaje del chat.
+        await db_pool.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_session_created "
+            "ON agent.chat_messages (session_id, created_at DESC)"
+        )
         # Metadata por mensaje: guarda los candidatos que se mostraron en la
         # barra de CVs, para poder reconstruirla al recargar el historial
         # (antes /history solo devolvía role + content).
@@ -221,17 +239,107 @@ async def _descartados(session_id: str) -> list[int]:
         return []
 
 
+async def _mostrados(session_id: str, desde=None) -> tuple[list[int], list[str]]:
+    """Candidatos que YA se le mostraron al usuario en la conversación en curso.
+
+    Salen de la metadata que cada respuesta de búsqueda dejó guardada (la misma
+    que reconstruye la barra de CVs), así que no cuesta una consulta a Qdrant ni
+    un embedding. Se usan para dos cosas: excluirlos de la búsqueda cuando pide
+    gente distinta, y avisarle al modelo a quién ya vio para que no lo presente
+    como novedad.
+
+    Se abre la metadata en SQL (LATERAL) en vez de traerla entera: son pocas
+    filas, pero cada una arrastra el JSON completo de 5 candidatos.
+
+    Tope de 12 respuestas de búsqueda (≈60 candidatos, el mismo
+    nodes.MAX_EXCLUIR). Mientras no se haya tocado «Nueva conversación» el
+    corte es NULL y esto barrería la sesión entera — que puede tener semanas de
+    búsquedas de otros puestos, y excluirlas a todas escondería a alguien que
+    para este puesto sí sirve. El LIMIT sale del índice (session_id,
+    created_at DESC), así que cuesta lo mismo con 100 mensajes que con 10.000.
+    """
+    try:
+        rows = await db_pool.fetch(
+            """
+            WITH ultimas AS (
+                SELECT m.metadata, m.created_at
+                  FROM agent.chat_messages m
+                 WHERE m.session_id = $1
+                   AND m.role = 'ai'
+                   AND jsonb_typeof(m.metadata->'candidatos') = 'array'
+                   AND ($2::timestamptz IS NULL OR m.created_at >= $2)
+                 ORDER BY m.created_at DESC
+                 LIMIT 12
+            )
+            SELECT c->>'candidato_id' AS id, c->>'nombre' AS nombre
+              FROM ultimas
+              CROSS JOIN LATERAL jsonb_array_elements(ultimas.metadata->'candidatos') c
+             ORDER BY ultimas.created_at ASC
+            """,
+            session_id, desde,
+        )
+    except Exception:
+        logger.exception("no pude leer los candidatos ya mostrados de %s", session_id)
+        return [], []
+    ids: list[int] = []
+    nombres: list[str] = []
+    for r in rows:
+        if r["id"]:
+            try:
+                cid = int(r["id"])
+            except (TypeError, ValueError):
+                continue
+            if cid not in ids:
+                ids.append(cid)
+        n = (r["nombre"] or "").strip()
+        if n and n.lower() != "sin nombre" and n not in nombres:
+            nombres.append(n)
+    return ids, nombres
+
+
+@app.post("/conversacion/{session_id}/nueva")
+async def conversacion_nueva(session_id: str):
+    """Botón «Nueva conversación» del chat.
+
+    Marca desde dónde empieza la charla nueva y limpia el resumen. NO borra
+    mensajes: el historial anterior sigue en la base y se puede volver a ver
+    con GET /history/{session_id}?todo=1. Lo único que cambia es hasta dónde
+    mira el modelo — ver summary.inicio_conversacion."""
+    desde = await marcar_conversacion_nueva(db_pool, session_id)
+    return {"ok": True, "desde": desde.isoformat() if desde else None}
+
+
 @app.get("/history/{session_id}")
-async def history(session_id: str):
+async def history(session_id: str, todo: int = 0):
+    """Mensajes de la conversación EN CURSO. Con ?todo=1 devuelve todo el
+    historial de la sesión (el botón «Ver anteriores» del chat).
+
+    `anteriores` es cuántos mensajes quedaron del otro lado del corte: el chat
+    lo usa para ofrecer verlos. Nunca se borra nada."""
     user_id = user_id_from_session(session_id)
+    desde = await db_pool.fetchval(
+        "SELECT conversacion_desde FROM agent.chat_summary WHERE session_id = $1",
+        session_id,
+    )
+    corte = None if todo else desde
     rows = await db_pool.fetch(
         "SELECT role, content, metadata FROM agent.chat_messages "
         "WHERE session_id = $1 AND user_id = $2 "
+        "AND ($3::timestamptz IS NULL OR created_at >= $3) "
         "ORDER BY created_at ASC",
-        session_id, user_id,
+        session_id, user_id, corte,
     )
+    anteriores = 0
+    if desde is not None:
+        anteriores = await db_pool.fetchval(
+            "SELECT count(*) FROM agent.chat_messages "
+            "WHERE session_id = $1 AND user_id = $2 AND created_at < $3",
+            session_id, user_id, desde,
+        ) or 0
     descartados = await _descartados(session_id)
     return {
+        "anteriores": int(anteriores),
+        "desde": desde.isoformat() if desde else None,
         "history": [
             {
                 "role": r["role"],
@@ -584,12 +692,20 @@ async def chat(request: ChatRequest):
             return ChatResponse(response=emp_answer, session_id=session_id, intent="employee")
 
         # === Flujo normal CVs ===
+        # Corte de conversación ANTES de insertar el mensaje: si pasaron más de
+        # CONVERSACION_HORAS desde el último, arranca charla nueva y no se
+        # carga nada de la anterior (ver summary.inicio_conversacion).
+        desde = await inicio_conversacion(db_pool, session_id)
+
         await db_pool.execute(
             "INSERT INTO agent.chat_messages (session_id, user_id, role, content) VALUES ($1, $2, $3, $4)",
             session_id, user_id, "human", request.message
         )
 
-        history = await load_context(db_pool, session_id)
+        history = await load_context(db_pool, session_id, desde=desde)
+        # Candidatos ya mostrados en esta conversación: para no repetirlos
+        # cuando el usuario pide otros (ver nodes.rag_search_node).
+        mostrados, mostrados_nombres = await _mostrados(session_id, desde)
 
         graph_config = {"configurable": {"thread_id": session_id}}
         initial_state = {
@@ -601,6 +717,9 @@ async def chat(request: ChatRequest):
             "final_response": None,
             # los descartados del tacho se excluyen de la búsqueda de CVs
             "descartados": await _descartados(session_id),
+            # los ya mostrados se excluyen sólo si pide gente distinta
+            "mostrados": mostrados,
+            "mostrados_nombres": mostrados_nombres,
             # intent "ventas" — ver docstring de ChatRequest y app/ventas_tools.py
             "ventas_habilitado": request.vicki_ventas_habilitado,
             "ventas_admin": request.vicki_ventas_admin,

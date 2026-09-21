@@ -19,6 +19,17 @@ class AgentState(TypedDict):
     candidatos: Optional[list]           # ← candidatos de los hits de CVs (barra lateral del chat)
     cv_diag: Optional[str]               # ← por qué la búsqueda de CVs vino vacía (infra, no ausencia)
     descartados: Optional[list]          # ← candidato_id tirados al tacho en esta conversación
+    # ── No repetir candidatos ───────────────────────────────────────────────
+    # `mostrados` son los candidato_id que ya se le mostraron al usuario en
+    # esta conversación (salen de agent.chat_messages.metadata, ver main.py).
+    # Se excluyen en Qdrant SOLO cuando pide gente distinta (`pide_otros`);
+    # `sin_nuevos` marca que se excluyeron y no quedó nadie más cargado.
+    mostrados: Optional[list]
+    mostrados_nombres: Optional[list]
+    pide_otros: Optional[bool]
+    pide_recorte: Optional[bool]         # ← pidió zona/edad/estudios: la búsqueda no filtra por eso
+    sin_nuevos: Optional[bool]
+    excluidos_n: Optional[int]
     final_response: Optional[str]
     session_id: Optional[str]
     # ── Intent "ventas" — ver app/ventas_tools.py ──────────────────────────

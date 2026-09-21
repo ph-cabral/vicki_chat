@@ -219,7 +219,8 @@ def _candidato_de_hit(col: str, p) -> dict | None:
 def search_cvs(query: str, collections: list[str], k: int | None = None,
                vector: list[float] | None = None,
                descartados: list[int] | None = None,
-               top_n: int | None = None) -> tuple[str, list[dict]]:
+               top_n: int | None = None,
+               excluir_ids: list[int] | None = None) -> tuple[str, list[dict]]:
     """Búsqueda de CVs: devuelve (contexto formateado, candidatos).
 
     Los candidatos salen de los MISMOS hits que arma el contexto — no hay una
@@ -239,6 +240,14 @@ def search_cvs(query: str, collections: list[str], k: int | None = None,
     Sin piso de score a propósito: la shortlist es "lo más parecido que hay",
     no "lo que matchea". El encaje parcial lo explica el modelo, no se filtra
     acá — ver prompts.py::SHORTLIST_RULES.
+
+    `excluir_ids` son los candidatos que YA se mostraron en la conversación y
+    que el usuario pidió no volver a ver ("dame otros 5", "sin repetir los
+    anteriores"). Se excluyen EN QDRANT, igual que los descartados: filtrarlos
+    después haría que cada repetido gastara un lugar del top_n y la lista
+    volviera con dos o tres nombres. Si la búsqueda vuelve vacía es la
+    respuesta honesta —no hay más gente cargada para ese puesto— y el nodo lo
+    dice en vez de reponer a los mismos (ver prompts.py::NO_REPETIR_SIN_STOCK).
 
     Lo que SÍ se hace es MARCAR el encaje débil: los que quedan por debajo de
     config.CANDIDATO_MIN_SCORE salen con `encaje_debil=True` y el contexto los
@@ -263,7 +272,10 @@ def search_cvs(query: str, collections: list[str], k: int | None = None,
             cols = avail[:1]
         else:
             return "", []
-    hits = _buscar_hits(query, cols, k, _filtro_descartes(descartados), vector, None)
+    # descartados (tacho) + ya mostrados (pedido de "otros"): una sola lista,
+    # un solo must_not — Qdrant no los cuenta para el top_k.
+    excluidos = list(descartados or []) + list(excluir_ids or [])
+    hits = _buscar_hits(query, cols, k, _filtro_descartes(excluidos), vector, None)
 
     # Agrupado por persona, respetando el orden por score de `hits`: el primer
     # chunk de alguien define su posición en la shortlist.
@@ -376,12 +388,19 @@ def embed_query(query: str) -> list[float]:
     return get_embeddings().embed_query(query)
 
 
-def search_descripcion_puesto(query: str, k: int | None = None, vector=None) -> str:
+def search_descripcion_puesto(query: str, k: int | None = None, vector=None,
+                              min_score: float | None = None) -> str:
     """Busca SOLO descripciones de puesto (dentro de PROC_COLLECTION).
 
     Existe porque router_node excluye PROC_COLLECTION de las búsquedas de CVs
     (para que los procedimientos no ensucien los candidatos), pero el perfil del
     puesto SÍ tiene que llegar cuando se busca gente. Se trae aparte y filtrado.
+
+    Va con piso de score (config.PERFIL_MIN_SCORE) porque Qdrant devuelve los K
+    mejores aunque no tengan nada que ver: buscando "administrativa" entraba la
+    descripción de Responsable de RRHH —la única cargada parecida— y la
+    respuesta salía rotulada con ESE puesto. Sin descripción que se acerque, es
+    preferible evaluar contra lo que pidió el usuario.
     """
     return search_collections(
         query,
@@ -389,6 +408,7 @@ def search_descripcion_puesto(query: str, k: int | None = None, vector=None) -> 
         k=k or config.PERFIL_TOP_K,
         flt=_filtro_tipo_doc([TIPO_DESCRIPCION_PUESTO]),
         vector=vector,
+        score_threshold=config.PERFIL_MIN_SCORE if min_score is None else min_score,
     )
 
 

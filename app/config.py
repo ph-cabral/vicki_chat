@@ -56,6 +56,12 @@ class Config:
     # Cuántos chunks de descripción de puesto se inyectan al buscar candidatos.
     # Chico a propósito: es contexto de apoyo, no puede desplazar a los CVs.
     PERFIL_TOP_K: int = int(os.getenv("PERFIL_TOP_K", "4"))
+    # Piso de relevancia de la descripción de puesto. SIN piso, Qdrant devuelve
+    # igual la descripción más cercana aunque sea de otro puesto, y el modelo
+    # rotulaba la respuesta con ese puesto: una búsqueda de "administración"
+    # salió como "candidatas ... para el puesto de Responsable de RRHH". Mismo
+    # criterio que PROC_CONTEXT_MIN_SCORE: si no se acerca, mejor sin perfil.
+    PERFIL_MIN_SCORE: float = float(os.getenv("PERFIL_MIN_SCORE", "0.35"))
     # ── Shortlist de candidatos ───────────────────────────────────────────────
     # Cuántas PERSONAS distintas se devuelven siempre, ordenadas de mayor a
     # menor cercanía al puesto. TOP_K cuenta CHUNKS, no personas: un CV largo
@@ -76,6 +82,13 @@ class Config:
     # lugar. Cosine sobre text-embedding-3-small: un CV del rubro correcto anda
     # por 0.40-0.55; abajo de 0.35 ya suele ser otro palo.
     CANDIDATO_MIN_SCORE: float = float(os.getenv("CANDIDATO_MIN_SCORE", "0.35"))
+    # ── Corte de conversación ─────────────────────────────────────────────────
+    # El session_id es fijo por usuario (user_<uid>): la charla no termina
+    # nunca y el modelo sigue leyendo lo que se habló días atrás. El corte lo
+    # marca el botón «Nueva conversación» del chat; esto agrega ADEMÁS un corte
+    # automático por inactividad. 0 = apagado (sólo corte manual). Nada se
+    # borra en ningún caso: cambia hasta dónde mira el modelo, no el historial.
+    CONVERSACION_HORAS: float = float(os.getenv("CONVERSACION_HORAS", "0"))
     # ── Procedimientos/instructivos como contexto al BUSCAR CANDIDATOS ────────
     # Además del perfil (qué se pide), se inyecta qué HACE el puesto. Va con
     # piso de score porque la query es de candidatos, no de procedimientos: sin

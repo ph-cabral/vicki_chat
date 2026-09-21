@@ -1,4 +1,5 @@
 import asyncio
+import datetime as dt
 import logging
 import os
 import re
@@ -25,16 +26,83 @@ def strip_b64(s: str) -> str:
 
 MAX_FOLD_CHARS = 60000 
 
-async def load_context(pool, session_id: str):
-    """Devuelve lista de mensajes LangChain: [resumen?] + últimos KEEP_LAST."""
-    srow = await pool.fetchrow(
+async def inicio_conversacion(pool, session_id: str):
+    """Arranque de la conversación EN CURSO dentro de la sesión.
+
+    El session_id es fijo por usuario (user_<uid>), así que la charla no termina
+    nunca: sin un corte, el modelo sigue leyendo lo que se habló días atrás — un
+    "hola, necesito perfiles de depósito" se contestó con la productividad de
+    agosto de la semana anterior.
+
+    El corte lo marca `agent.chat_summary.conversacion_desde`, y lo pone el
+    botón «Nueva conversación» del chat (POST /conversacion/{session_id}/nueva).
+    NO SE BORRA NADA: los mensajes quedan todos en la base y se siguen pudiendo
+    ver desde el chat; lo único que cambia es hasta dónde mira el modelo.
+
+    `config.CONVERSACION_HORAS` agrega, además, un corte automático por
+    inactividad. Viene en 0 = apagado: el corte es manual. Poniéndole un número
+    de horas, una charla retomada después de ese tiempo arranca limpia sola.
+
+    Devuelve el datetime de corte, o None si todavía no hay ninguno.
+    """
+    desde = await pool.fetchval(
+        "SELECT conversacion_desde FROM agent.chat_summary WHERE session_id = $1",
+        session_id,
+    )
+    horas = config.CONVERSACION_HORAS
+    if horas > 0:
+        ultimo = await pool.fetchval(
+            "SELECT max(created_at) FROM agent.chat_messages WHERE session_id = $1",
+            session_id,
+        )
+        if ultimo is not None:
+            inactivo = dt.datetime.now(dt.timezone.utc) - ultimo
+            if inactivo > dt.timedelta(hours=horas) and (desde is None or desde < ultimo):
+                log.info(f"[CONV] {session_id}: corte automático ({horas} h sin mensajes)")
+                return await marcar_conversacion_nueva(pool, session_id)
+    return desde
+
+
+async def marcar_conversacion_nueva(pool, session_id: str):
+    """Abre una conversación nueva: corre el corte a ahora y limpia el resumen
+    (si no, la charla nueva arrancaría con el resumen de la anterior). Los
+    mensajes NO se tocan. Devuelve el corte."""
+    return await pool.fetchval(
+        """
+        INSERT INTO agent.chat_summary
+               (session_id, summary, summarized_through, conversacion_desde, updated_at)
+        VALUES ($1, '', NOW(), NOW(), NOW())
+        ON CONFLICT (session_id) DO UPDATE
+        SET summary = '', summarized_through = NOW(),
+            conversacion_desde = NOW(), updated_at = NOW()
+        RETURNING conversacion_desde
+        """,
+        session_id,
+    )
+
+
+async def load_context(pool, session_id: str, desde=None):
+    """Devuelve lista de mensajes LangChain: [resumen?] + últimos KEEP_LAST.
+
+    `desde` acota el contexto a la conversación en curso (ver
+    reiniciar_conversacion): con un valor, no se carga el resumen ni ningún
+    mensaje anterior a esa hora."""
+    srow = None if desde else await pool.fetchrow(
         "SELECT summary FROM agent.chat_summary WHERE session_id = $1", session_id
     )
-    rows = await pool.fetch(
-        "SELECT role, content FROM agent.chat_messages "
-        "WHERE session_id = $1 ORDER BY created_at DESC LIMIT $2",
-        session_id, KEEP_LAST,
-    )
+    if desde:
+        rows = await pool.fetch(
+            "SELECT role, content FROM agent.chat_messages "
+            "WHERE session_id = $1 AND created_at >= $2 "
+            "ORDER BY created_at DESC LIMIT $3",
+            session_id, desde, KEEP_LAST,
+        )
+    else:
+        rows = await pool.fetch(
+            "SELECT role, content FROM agent.chat_messages "
+            "WHERE session_id = $1 ORDER BY created_at DESC LIMIT $2",
+            session_id, KEEP_LAST,
+        )
     rows = list(reversed(rows))
 
     msgs = []
@@ -103,6 +171,8 @@ async def _update_summary(pool, session_id: str):
         """,
         session_id, KEEP_LAST, watermark,
     )
+    # inicio_conversacion() ya corrió la marca de agua a NOW() al abrir una
+    # conversación nueva, así que acá nunca vuelven mensajes de la anterior.
     if not rows:
         return
 

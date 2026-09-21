@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 
 from langchain_anthropic import ChatAnthropic
@@ -20,13 +21,18 @@ from app.graph_state import AgentState
 from app.prompts import (
     ENCAJE_DEBIL_RULES,
     ENCAJE_DEBIL_TODOS,
+    FILTRO_NO_APLICADO_RULES,
+    GENERAL_PROMPT,
     GROUNDING_RULES,
+    NO_REPETIR_OK,
+    NO_REPETIR_SIN_STOCK,
     PERFIL_BLOCK,
     PROC_CONTEXT_BLOCK,
     PROC_RESPONSE_PROMPT,
     ROUTER_PROMPT,
     SHORTLIST_RULES,
     SYSTEM_PROMPT,
+    YA_MOSTRADOS_BLOCK,
 )
 from app.tool import take_camera_snapshot
 from app.tools import (
@@ -39,6 +45,10 @@ from app.tools import (
 )
 
 log = logging.getLogger("nodes")
+
+# Tope de candidatos a excluir por pedido de "otros": un must_not con cientos
+# de ids encarece la búsqueda y, pasados unos cuantos, ya no queda nadie nuevo.
+MAX_EXCLUIR = 60
 
 # Extrae nombres de candidatos desde el bloque que arma _format_hit() en tools.py
 # ("--- Nombre Apellido (colección: ..., relevancia: ...) ---").
@@ -121,7 +131,125 @@ router_llm = LLMWithFallback(
     ),
 )
 
-VALID_INTENTS = {"search", "ranking", "procedimiento", "ventas", "rrhh", "camera", "general"}
+# OJO: faltaban "compras" y "deposito" — las preguntas de esos módulos las
+# clasificaba bien el router, pero acá se pisaban a "general" y terminaban en
+# el nodo conversacional, que NO tiene datos. Ahí el modelo completaba: llegó a
+# contestar "en agosto los preparadores hicieron 1.200 ítems y la mesa 950",
+# todo inventado. Los intents tienen que estar los mismos que en graph.py.
+VALID_INTENTS = {"search", "ranking", "procedimiento", "ventas", "rrhh",
+                 "compras", "deposito", "camera", "general"}
+
+# Intents que responden con datos reales de un módulo (nunca con el LLM).
+INTENTS_DE_DATOS = ("ventas", "rrhh", "compras", "deposito")
+
+
+def _norm(s: str) -> str:
+    """minúsculas sin acentos, para que 'ítems' y 'items' sean lo mismo."""
+    s = unicodedata.normalize("NFD", (s or "").lower())
+    return "".join(c for c in s if not unicodedata.combining(c))
+
+
+# Palabras que identifican de qué módulo sale un número. Es una RED DE
+# SEGURIDAD, no el router: se usa solo para corregir al router cuando manda una
+# pregunta de datos al nodo conversacional (que la contestaría inventando) o
+# cuando la manda al módulo equivocado. El permiso lo sigue chequeando cada
+# nodo, así que reencaminar acá no saltea ningún control.
+_PALABRAS_MODULO = {
+    "deposito": (
+        r"\bitems?\b", r"\bunidades preparadas\b", r"picke", r"picking",
+        r"\bpreparador", r"mesa de control", r"\bcontrolador",
+        r"productividad", r"\bprepararon\b", r"\bpreparo\b",
+    ),
+    "compras": (
+        r"faltante", r"\bfalto\b", r"orden(es)? de compra", r"\bocs?\b",
+        r"\bingres(o|os|aron|ados?)\b", r"\bimportados?\b", r"\bnacionales?\b",
+        r"sin cubrir", r"se cubrio",
+    ),
+    "rrhh": (
+        r"asistencia", r"\bausenc", r"\bfalt(o|as|aron|ando)\b", r"horas? extra",
+        r"\bferiado", r"vacacion", r"licencia", r"\bfichad", r"presentismo",
+        r"\bpresent(e|es)\b", r"\bse present", r"\basisti(o|eron)\b",
+        r"\bquien(es)? falt", r"\bfalt(o|aron)\b.{0,25}\b(a trabajar|al trabajo)\b",
+        r"\bno vino\b", r"dias? de (falta|licencia|vacaciones)",
+    ),
+    "ventas": (
+        r"factur", r"\bventas?\b", r"\bvendi(o|mos|eron|ste)?\b",
+        r"\bcliente", r"ranking de vendedores", r"\bcomprobantes?\b",
+    ),
+}
+_PALABRAS_MODULO_RE = {
+    k: [re.compile(p) for p in pats] for k, pats in _PALABRAS_MODULO.items()
+}
+
+
+# Veto de la red de seguridad: pedidos que NOMBRAN palabras de un módulo pero
+# no piden un número — un instructivo ("el procedimiento de picking") o gente a
+# contratar ("candidatos para operario de depósito"). Sin esto, la corrección
+# de intent los mandaba al módulo de datos.
+_NO_ES_DATO_RE = [re.compile(p) for p in (
+    r"procedimiento", r"instructivo", r"\bnorma\b", r"\bpaso a paso\b",
+    r"\bcomo se (hace|carga|arma|prepara|completa|registra)\b",
+    r"\bperfil(es)?\b", r"\bcandidat", r"\bcurriculum", r"\bcvs?\b",
+    r"\bpostulante", r"\bcontratar\b", r"\bvacante\b", r"\bbusqueda de personal\b",
+)]
+
+
+def _puntaje_modulos(mensaje: str) -> dict:
+    txt = _norm(mensaje)
+    return {k: sum(1 for r in rs if r.search(txt))
+            for k, rs in _PALABRAS_MODULO_RE.items()}
+
+
+def _modulo_por_palabras(mensaje: str) -> tuple[str | None, dict]:
+    """Módulo más probable según las palabras del mensaje, o None si empata
+    o no hay ninguna."""
+    sc = _puntaje_modulos(mensaje)
+    txt = _norm(mensaje)
+    if any(r.search(txt) for r in _NO_ES_DATO_RE):
+        return None, sc
+    mejor = max(sc, key=lambda k: sc[k])
+    if sc[mejor] == 0:
+        return None, sc
+    if sum(1 for k, v in sc.items() if v == sc[mejor]) > 1:
+        return None, sc  # empate: no tocar lo que dijo el router
+    return mejor, sc
+
+
+# "dame otros 5", "sin repetir", "perfiles distintos": el usuario pide gente
+# que todavía no vio. Determinístico a propósito — de esto depende que se
+# excluya a los ya mostrados, y no puede quedar librado a cómo redacte el LLM.
+_PIDE_OTROS_RE = [re.compile(p) for p in (
+    r"\botr[oa]s\b", r"\bdistint", r"\bdiferent", r"\bnuev[oa]s\b",
+    r"sin repetir", r"no (me )?repit", r"\bmas perfiles\b", r"\bmas candidatos\b",
+    r"(perfiles|candidatos|cvs?|curriculums?)\s+mas\b",
+    r"que no (me )?(hayas|has|habias)\s+(pasado|dado|mostrado|planteado)",
+    r"(ya )?(me )?(pasaste|diste|mostraste|planteaste|has pasado|has planteado)",
+)]
+
+
+def _pide_otros(mensaje: str) -> bool:
+    txt = _norm(mensaje)
+    return any(r.search(txt) for r in _PIDE_OTROS_RE)
+
+
+# Recortes que el usuario pide pero que la búsqueda NO sabe aplicar (es
+# similitud de texto, no filtros por campo). Cuando aparecen, se le avisa al
+# modelo que no puede decir que filtró — llegó a contestar "los 5 perfiles
+# nuevos, todos de San Francisco" sobre una lista que no se filtró por nada.
+_PIDE_RECORTE_RE = [re.compile(p) for p in (
+    r"que (sean|vivan|tengan|esten|cuenten|manejen|posean|residan)",
+    r"\bzona\b", r"\blocalidad\b", r"\bciudad\b", r"\bviven? en\b",
+    r"\bresiden", r"\bedad\b", r"\bmenores?\b", r"\bmayores?\b",
+    r"\bsecundario\b", r"\btitulo\b", r"universitari", r"terciari",
+    r"\bcarnet\b", r"registro de conducir", r"\bmovilidad\b",
+    r"disponibilidad", r"\bturno", r"\bhombres?\b", r"\bmujeres?\b",
+    r"\bchic[oa]s\b", r"\bvar[oo]nes?\b", r"femenin", r"masculin",
+)]
+
+
+def _pide_recorte(mensaje: str) -> bool:
+    txt = _norm(mensaje)
+    return any(r.search(txt) for r in _PIDE_RECORTE_RE)
 
 
 def _safe_json(text: str) -> dict:
@@ -154,6 +282,21 @@ def router_node(state: AgentState) -> AgentState:
 
     if intent not in VALID_INTENTS:
         intent = "general"
+
+    # Red de seguridad sobre el router (que es un LLM y se equivoca): si las
+    # palabras del mensaje apuntan claramente a un módulo de datos, va ahí.
+    # Dos fallas reales que esto corrige: "cuántos ítems se hicieron en agosto"
+    # cayó en "general" y el modelo inventó el número; "total de ítems de los
+    # preparadores" fue a asistencia y devolvió horas trabajadas. Reencaminar
+    # NO saltea permisos: el gate lo chequea cada nodo contra la sesión.
+    sugerido, puntaje = _modulo_por_palabras(user_message)
+    if sugerido and intent == "general":
+        log.info(f"[ROUTER] general → {sugerido} por palabras {puntaje}")
+        intent = sugerido
+    elif (sugerido and sugerido != intent and intent in INTENTS_DE_DATOS
+          and puntaje[sugerido] > puntaje.get(intent, 0)):
+        log.info(f"[ROUTER] {intent} → {sugerido} por palabras {puntaje}")
+        intent = sugerido
     # Buscar SIEMPRE en todas las colecciones disponibles para search/ranking.
     # Antes el LLM elegía la(s) colección(es) "más afín(es)" y esa elección
     # dependía de cómo estaba redactada la pregunta: "vendedor viajante para
@@ -187,12 +330,21 @@ def router_node(state: AgentState) -> AgentState:
         "user_message": user_message,
         "search_query": search_query,
         "collections": collections,
+        # banderas determinísticas del pedido (no las decide el LLM):
+        # si pide gente que todavía no vio, y si pide un recorte que la
+        # búsqueda no sabe aplicar (localidad, edad, estudios, género).
+        "pide_otros": _pide_otros(user_message),
+        "pide_recorte": _pide_recorte(user_message),
     }
 
 
 def general_node(state: AgentState) -> AgentState:
-    """Respuesta conversacional sin RAG (saludos, dudas, temas generales)."""
-    messages = [SystemMessage(content=SYSTEM_PROMPT), *state["messages"]]
+    """Respuesta conversacional sin RAG (saludos, dudas, temas generales).
+
+    Es el ÚNICO nodo que contesta sin ningún dato recuperado, así que lleva
+    GENERAL_PROMPT encima: acá no hay documento que contradiga una respuesta
+    inventada, y es donde salió el "1.200 ítems" de agosto que no existe."""
+    messages = [SystemMessage(content=SYSTEM_PROMPT + GENERAL_PROMPT), *state["messages"]]
     response = llm.invoke(messages)
     return {
         **state,
@@ -240,12 +392,21 @@ def rag_search_node(state: AgentState) -> AgentState:
     # tiró al tacho en esta conversación: se excluyen en Qdrant.
     cvs_res: dict = {"texto": "", "candidatos": []}
 
+    # "dame otros 5", "sin repetir los que me pasaste": se excluyen EN QDRANT
+    # los candidatos que ya se mostraron en esta conversación. Sin esto la
+    # búsqueda devolvía siempre el mismo top-5 por más que el usuario lo
+    # pidiera distinto (en una charla real, el mismo CV apareció en 5 de 11
+    # respuestas seguidas). Se acota a los últimos MAX_EXCLUIR para no armar un
+    # must_not gigante en una conversación larga.
+    excluir = (state.get("mostrados") or [])[-MAX_EXCLUIR:] if state.get("pide_otros") else []
+
     def _buscar_cvs():
         texto, cands = search_cvs(
             query,
             state.get("collections") or [],
             vector=vector,
             descartados=state.get("descartados") or [],
+            excluir_ids=excluir,
         )
         cvs_res["texto"], cvs_res["candidatos"] = texto, cands
         return texto
@@ -278,15 +439,21 @@ def rag_search_node(state: AgentState) -> AgentState:
     # infraestructura (Qdrant caído, colección de CVs inexistente o vacía).
     # Antes las tres cosas terminaban en la misma respuesta y el reclutador
     # concluía que no había gente cargada.
+    # Pidió gente nueva, se excluyó a los ya vistos y no quedó nadie: NO es una
+    # falla, es la respuesta honesta (no hay más CVs cargados para ese puesto).
+    # Se marca aparte para que el modelo lo diga en vez de reponer a los mismos
+    # presentándolos como nuevos — ver prompts.py::NO_REPETIR_SIN_STOCK.
+    sin_nuevos = bool(excluir) and not candidatos
     cv_diag = ""
-    if not candidatos:
+    if not candidatos and not sin_nuevos:
         cv_diag = diagnostico_cvs(state.get("collections"))
         if cv_diag:
             log.error(f"[RAG] búsqueda de CVs vacía → {cv_diag}")
     log.info(
         f"[RAG] query={query[:120]!r} cols={state.get('collections')} "
         f"{len(docs)} chars cvs + {len(perfil)} chars perfil + {len(proc)} chars proc "
-        f"+ {len(candidatos)} candidatos ({len(state.get('descartados') or [])} descartados)"
+        f"+ {len(candidatos)} candidatos "
+        f"({len(state.get('descartados') or [])} descartados, {len(excluir)} ya mostrados)"
     )
     return {
         **state,
@@ -295,6 +462,8 @@ def rag_search_node(state: AgentState) -> AgentState:
         "proc_docs": proc,
         "candidatos": candidatos,
         "cv_diag": cv_diag,
+        "sin_nuevos": sin_nuevos,
+        "excluidos_n": len(excluir),
     }
 
 
@@ -356,6 +525,24 @@ def response_node(state: AgentState) -> AgentState:
         shortlist_block += ENCAJE_DEBIL_TODOS.format(n=n_cands)
     elif n_debiles:
         shortlist_block += ENCAJE_DEBIL_RULES.format(n_debiles=n_debiles, n=n_cands)
+    # Pedido de "otros/sin repetir": o se excluyó a los ya vistos y estos son
+    # nuevos de verdad, o no quedó nadie y hay que decirlo. Sin esto el modelo
+    # volvía a listar a los mismos anunciándolos como "los 5 perfiles nuevos".
+    if state.get("sin_nuevos"):
+        shortlist_block += NO_REPETIR_SIN_STOCK
+    elif state.get("excluidos_n") and n_cands:
+        shortlist_block += NO_REPETIR_OK.format(n=n_cands)
+    # El usuario pidió un recorte que la búsqueda no sabe aplicar (localidad,
+    # edad, estudios, género): que no lo dé por hecho, que lo verifique CV por CV.
+    if state.get("pide_recorte"):
+        shortlist_block += FILTRO_NO_APLICADO_RULES
+    # Quiénes ya se mostraron en la conversación: para que no presente como
+    # novedad a alguien que el usuario ya vio.
+    ya_vistos = [n for n in (state.get("mostrados_nombres") or []) if n]
+    ya_block = (
+        YA_MOSTRADOS_BLOCK.format(nombres=", ".join(ya_vistos[-30:])) + "\n"
+        if ya_vistos else ""
+    )
     # Falla de infraestructura, no ausencia de gente: se lo decimos al modelo
     # para que no responda "no hay candidatos para ese puesto" cuando en
     # realidad no pudo mirar ningún CV.
@@ -366,12 +553,18 @@ def response_node(state: AgentState) -> AgentState:
         f"podés afirmar que no hay candidatos para el puesto. Es un problema de "
         f"configuración/ingesta a revisar, no un resultado de la búsqueda.\n"
     ) if diag else ""
+    vacio = (
+        "(la búsqueda excluyó a los que ya se mostraron y no quedó ningún "
+        "candidato nuevo)"
+        if state.get("sin_nuevos") else "(no hay ningún CV cargado que se acerque)"
+    )
     context_prompt = (
         f"{perfil_block}"
         f"{proc_block}"
+        f"{ya_block}"
         f"## Shortlist: los {n_cands} candidatos más cercanos ({cols}), "
         f"ordenados de mayor a menor:\n"
-        f"{docs if docs else '(no hay ningún CV cargado que se acerque)'}\n\n"
+        f"{docs if docs else vacio}\n\n"
         f"## Consulta del usuario:\n{state['user_message']}\n\n"
         f"{shortlist_block}\n"
         f"{diag_block}"
