@@ -82,6 +82,31 @@ class Config:
     # lugar. Cosine sobre text-embedding-3-small: un CV del rubro correcto anda
     # por 0.40-0.55; abajo de 0.35 ya suele ser otro palo.
     CANDIDATO_MIN_SCORE: float = float(os.getenv("CANDIDATO_MIN_SCORE", "0.35"))
+    # ── Paginado de la shortlist ("dame 5" → "ahora los otros 5") ────────────
+    # CANDIDATOS_TOP_N es el default; si el usuario pide una cantidad ("dame
+    # 10 perfiles", "otros 3") manda esa, topeada acá. El tope existe porque
+    # cada candidato arrastra chunks de CV al prompt.
+    CANDIDATOS_TOP_N_MAX: int = int(os.getenv("CANDIDATOS_TOP_N_MAX", "15"))
+    # Cuántos candidatos ya mostrados se pueden excluir en Qdrant de una. Es el
+    # techo del paginado: con 5 por página, 120 son 24 páginas. Se excluyen con
+    # un must_not sobre metadata.candidato_id (indexado), así que la búsqueda no
+    # se encarece de forma apreciable.
+    MAX_EXCLUIR: int = int(os.getenv("MAX_EXCLUIR", "120"))
+    # Cuántas respuestas de búsqueda hacia atrás se leen para saber a quién ya
+    # vio (main.py::_mostrados). Tiene que dar para MAX_EXCLUIR: con 5 por
+    # respuesta, 24 respuestas ≈ 120 candidatos.
+    MOSTRADOS_MAX_RESPUESTAS: int = int(os.getenv("MOSTRADOS_MAX_RESPUESTAS", "24"))
+    # ── Pool ampliado cuando se pide un recorte que la búsqueda NO aplica ─────
+    # La búsqueda es similitud de texto: no filtra por género, zona, edad ni
+    # estudios. Si se pide uno de esos recortes sobre la shortlist normal (5),
+    # el recorte se aplica sobre 5 CVs y la respuesta termina en "no hay
+    # ninguna" aunque más abajo en la lista sí haya. Cuando aparece un recorte
+    # así se traen top_n * FACTOR candidatos (tope POOL_MAX) y el modelo filtra
+    # sobre ese pool. Con el pool grande entra 1 chunk por CV para no reventar
+    # el prompt.
+    RECORTE_POOL_FACTOR: int = int(os.getenv("RECORTE_POOL_FACTOR", "5"))
+    RECORTE_POOL_MAX: int = int(os.getenv("RECORTE_POOL_MAX", "30"))
+    RECORTE_CHUNKS_POR_CANDIDATO: int = int(os.getenv("RECORTE_CHUNKS_POR_CANDIDATO", "1"))
     # ── Corte de conversación ─────────────────────────────────────────────────
     # El session_id es fijo por usuario (user_<uid>): la charla no termina
     # nunca y el modelo sigue leyendo lo que se habló días atrás. El corte lo

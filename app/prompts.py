@@ -263,22 +263,39 @@ más parecido que hay en la base.
 - No descartes a nadie de la lista por no encajar del todo: el reclutador
   decide, vos mostrás. Única excepción: los marcados "⚠️ ENCAJE DÉBIL", que
   se presentan aparte — ver el bloque de más abajo si aparece.
-- Cerrá con una línea de cómo ampliar o afinar la búsqueda.
+- Cerrá con una línea: que puede pedir los siguientes ("dame otros 5") o
+  afinar la búsqueda. La lista está paginada: pedir más NO repite a nadie.
 """
 
 # Se agrega cuando el usuario pidió un RECORTE que la búsqueda no sabe aplicar
-# (localidad, edad, estudios, disponibilidad). La búsqueda es por similitud de
-# texto: no filtra por ningún campo. Sin este bloque el modelo anunciaba el
-# filtro como hecho ("los 5 perfiles nuevos, todos de San Francisco") sobre una
-# lista que nunca se filtró.
+# (género, localidad, edad, estudios, carnet, disponibilidad). La búsqueda es
+# por similitud de texto: no filtra por ningún campo, el recorte lo hace el
+# modelo leyendo los CVs. Por eso, cuando aparece uno de estos pedidos,
+# rag_search_node trae un POOL más grande ({n_revisados} CVs en vez de la
+# shortlist normal) y acá se le dice que muestre sólo hasta {n} que CUMPLAN.
+# Dos fallas reales que esto corrige: "los 5 perfiles nuevos, todos de San
+# Francisco" sobre una lista que nunca se filtró, y "no hay candidatas
+# femeninas" tras mirar 5 CVs y listar igual a 5 varones rotulando "Hombre"
+# uno por uno.
 FILTRO_NO_APLICADO_RULES = """
-# Ojo con el recorte que pidió el usuario
-La búsqueda trae los CVs más parecidos al pedido; NO filtra por localidad,
-edad, estudios ni disponibilidad. Así que:
-- No digas ni des a entender que aplicaste ese recorte.
-- Revisá el texto de cada CV y decí, por candidato, si cumple, si no cumple o
-  si el CV no lo aclara. "No figura en el CV" es una respuesta válida.
-- Si ninguno cumple lo que pidió, decilo de entrada y mostrá igual lo que hay.
+# El usuario pidió un recorte — ESTO REEMPLAZA la regla de "presentalos a todos"
+Arriba hay {n_revisados} CVs: los más parecidos al puesto. La búsqueda NO filtra
+por género, localidad, edad, estudios, carnet ni disponibilidad — ese recorte lo
+hacés vos, leyendo cada CV. Entonces:
+- Revisá los {n_revisados} y quedate con hasta {n} que CUMPLAN lo pedido.
+  Mostrá SOLO a esos, numerados, con lo que dice su CV y qué les falta.
+- Empezá con una línea de cuántos CVs revisaste y cuántos cumplen
+  (ej. "De {n_revisados} CVs revisados, 3 cumplen").
+- A los que NO cumplen no los presentes como candidatos ni les pongas el rótulo
+  del recorte uno por uno. Si aportan algo, van juntos en UNA línea al final.
+- No afirmes ni niegues un dato que el CV no dice. Si lo estás deduciendo de
+  algo indirecto (el nombre de pila, la empresa, el rubro), decí que es una
+  deducción; si no hay de dónde deducirlo, va como "no figura en el CV".
+- Nunca digas que la búsqueda aplicó el recorte: no lo aplicó.
+- Si NINGUNO cumple, decilo en la primera línea, aclarando que es sobre los
+  {n_revisados} CVs más parecidos y no sobre toda la base, y ofrecé seguir
+  mirando más abajo en la lista ("pedime los siguientes {n}") o ampliar la
+  búsqueda. No rellenes la respuesta con los que no cumplen.
 """
 
 # Se agrega a SHORTLIST_RULES sólo cuando alguno de los candidatos vino marcado
@@ -315,14 +332,15 @@ Los {n} perfiles de arriba vinieron todos marcados "⚠️ ENCAJE DÉBIL": son l
 """
 
 # El usuario pidió gente distinta y la búsqueda SÍ excluyó a los ya mostrados
-# (nodes.py::rag_search_node → tools.search_cvs(excluir_ids=...)). {n} nuevos.
+# (nodes.py::rag_search_node → tools.search_cvs(excluir_ids=...)). Es el
+# paginado: {n} nuevos, página {pagina}, {ya} ya vistos antes.
 NO_REPETIR_OK = """
-# Estos son candidatos NUEVOS
-Los {n} de arriba se buscaron excluyendo a todos los que ya le mostraste en
-esta conversación, así que ninguno está repetido: podés decirlo. Lo que NO
-podés decir es que cumplen un recorte que la búsqueda no aplica (ver arriba).
+# Página {pagina}: son candidatos NUEVOS
+Los {n} de arriba se buscaron excluyendo a los {ya} que ya le mostraste en esta
+conversación, así que ninguno está repetido: podés decirlo.
 Al estar excluidos los mejores de antes, estos suelen encajar menos: sé claro
 con cuánto se alejan del puesto.
+Cerrá ofreciendo la página siguiente ("pedime otros {n}").
 """
 
 # El usuario pidió gente distinta pero YA NO QUEDA nadie nuevo cargado. Antes
@@ -333,7 +351,8 @@ NO_REPETIR_SIN_STOCK = """
 El usuario pidió perfiles distintos a los que ya vio, y la búsqueda excluyendo
 a los ya mostrados no devolvió a nadie más: en la base no hay más gente cargada
 que se acerque a ese puesto.
-- Arrancá la respuesta diciendo exactamente eso, sin adornarlo.
+- Arrancá la respuesta diciendo exactamente eso, sin adornarlo, con cuántos
+  lleva vistos ({ya}).
 - NO vuelvas a listar a los mismos como si fueran nuevos. Si los mencionás, es
   para recordar que ya se los mostraste.
 - Cerrá con qué se puede hacer: ampliar el puesto o el rubro, buscar otra zona,

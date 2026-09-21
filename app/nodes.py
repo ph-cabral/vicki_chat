@@ -48,7 +48,8 @@ log = logging.getLogger("nodes")
 
 # Tope de candidatos a excluir por pedido de "otros": un must_not con cientos
 # de ids encarece la búsqueda y, pasados unos cuantos, ya no queda nadie nuevo.
-MAX_EXCLUIR = 60
+# Es el techo del paginado (con páginas de 5, MAX_EXCLUIR=120 son 24 páginas).
+MAX_EXCLUIR = config.MAX_EXCLUIR
 
 # Extrae nombres de candidatos desde el bloque que arma _format_hit() en tools.py
 # ("--- Nombre Apellido (colección: ..., relevancia: ...) ---").
@@ -224,12 +225,55 @@ _PIDE_OTROS_RE = [re.compile(p) for p in (
     r"(perfiles|candidatos|cvs?|curriculums?)\s+mas\b",
     r"que no (me )?(hayas|has|habias)\s+(pasado|dado|mostrado|planteado)",
     r"(ya )?(me )?(pasaste|diste|mostraste|planteaste|has pasado|has planteado)",
+    # paginado explícito: "los siguientes 5", "la que sigue", "seguí", "el resto"
+    r"\bsiguientes?\b", r"\bproximos?\b", r"\bque sigue", r"\bsegui(r|me)?\b",
+    r"\bcontinua", r"\bel resto\b", r"\botra tanda\b", r"\bsegunda tanda\b",
+    r"\bpagina \d", r"\b(dame|mostrame|pasame|traeme) mas\b", r"^mas\b",
 )]
 
 
 def _pide_otros(mensaje: str) -> bool:
     txt = _norm(mensaje)
     return any(r.search(txt) for r in _PIDE_OTROS_RE)
+
+
+# Cuántos candidatos pidió ("dame 10 perfiles", "otros 3", "los siguientes
+# cinco"). Determinístico, igual que _pide_otros: define el tamaño de la
+# página, y si lo decidiera el LLM el paginado dejaría de ser reproducible.
+_NUM_PALABRA = {
+    "un": 1, "una": 1, "dos": 2, "tres": 3, "cuatro": 4, "cinco": 5, "seis": 6,
+    "siete": 7, "ocho": 8, "nueve": 9, "diez": 10, "once": 11, "doce": 12,
+    "quince": 15, "veinte": 20,
+}
+_NUM = r"(\d{1,2}|" + "|".join(_NUM_PALABRA) + r")"
+# Lo que sigue al número y hace que NO sea una cantidad de candidatos:
+# "que tengan 5 años de experiencia", "3 meses", "2 turnos".
+_NO_ES_CANTIDAD = r"(?!\s*(?:anos?|meses|mes\b|horas?|hs\b|km|turnos?|km/h))"
+_CANTIDAD_RE = [
+    # verbo de pedido + número: "dame 5", "mostrame otros tres", "top 10"
+    re.compile(r"\b(?:dame|dame otr[oa]s|mostrame|pasame|traeme|buscame|quiero|"
+               r"necesito|otr[oa]s|mas|siguientes|proximos|primeros|top|ver)\s+"
+               + _NUM + r"\b" + _NO_ES_CANTIDAD),
+    # número + sustantivo de candidato: "5 perfiles más", "diez CVs"
+    re.compile(_NUM + r"\s+(?:perfiles?|candidat[oa]s|cvs?|curriculums?|"
+               r"postulantes?|personas?|nombres?|opciones?)\b"),
+]
+
+
+def _cantidad_pedida(mensaje: str) -> int | None:
+    """Tamaño de página que pidió el usuario, o None si no dijo ninguno."""
+    txt = _norm(mensaje)
+    for r in _CANTIDAD_RE:
+        m = r.search(txt)
+        if not m:
+            continue
+        crudo = m.group(1)
+        n = int(crudo) if crudo.isdigit() else _NUM_PALABRA.get(crudo)
+        if n and 1 <= n <= config.CANDIDATOS_TOP_N_MAX:
+            return n
+        if n and n > config.CANDIDATOS_TOP_N_MAX:
+            return config.CANDIDATOS_TOP_N_MAX
+    return None
 
 
 # Recortes que el usuario pide pero que la búsqueda NO sabe aplicar (es
@@ -335,6 +379,8 @@ def router_node(state: AgentState) -> AgentState:
         # búsqueda no sabe aplicar (localidad, edad, estudios, género).
         "pide_otros": _pide_otros(user_message),
         "pide_recorte": _pide_recorte(user_message),
+        # tamaño de página pedido ("dame 10", "otros 3"); None = el default
+        "top_n_pedido": _cantidad_pedida(user_message),
     }
 
 
@@ -400,6 +446,23 @@ def rag_search_node(state: AgentState) -> AgentState:
     # must_not gigante en una conversación larga.
     excluir = (state.get("mostrados") or [])[-MAX_EXCLUIR:] if state.get("pide_otros") else []
 
+    # Tamaño de la PÁGINA: lo que pidió el usuario ("dame 10") o el default.
+    top_n = min(state.get("top_n_pedido") or config.CANDIDATOS_TOP_N,
+                config.CANDIDATOS_TOP_N_MAX)
+
+    # POOL AMPLIADO. Cuando el pedido trae un recorte que la búsqueda NO sabe
+    # aplicar (género, zona, edad, estudios, carnet), el filtro lo hace el
+    # modelo leyendo los CVs — y si le mandamos sólo 5, filtra sobre 5. Caso
+    # real: "perfiles femeninos para depósito" devolvió 5 CVs, los 5 de varones,
+    # y la respuesta fue "no hay candidatas", cuando lo único cierto es que no
+    # había ninguna entre las 5 más parecidas. Con el recorte se traen
+    # top_n * RECORTE_POOL_FACTOR CVs (tope RECORTE_POOL_MAX) y 1 chunk por
+    # persona, así el modelo filtra sobre una lista de verdad.
+    pool_ampliado = bool(state.get("pide_recorte"))
+    pool = min(top_n * config.RECORTE_POOL_FACTOR,
+               config.RECORTE_POOL_MAX) if pool_ampliado else top_n
+    por_cand = config.RECORTE_CHUNKS_POR_CANDIDATO if pool_ampliado else None
+
     def _buscar_cvs():
         texto, cands = search_cvs(
             query,
@@ -407,6 +470,8 @@ def rag_search_node(state: AgentState) -> AgentState:
             vector=vector,
             descartados=state.get("descartados") or [],
             excluir_ids=excluir,
+            top_n=pool,
+            chunks_por_candidato=por_cand,
         )
         cvs_res["texto"], cvs_res["candidatos"] = texto, cands
         return texto
@@ -453,7 +518,9 @@ def rag_search_node(state: AgentState) -> AgentState:
         f"[RAG] query={query[:120]!r} cols={state.get('collections')} "
         f"{len(docs)} chars cvs + {len(perfil)} chars perfil + {len(proc)} chars proc "
         f"+ {len(candidatos)} candidatos "
-        f"({len(state.get('descartados') or [])} descartados, {len(excluir)} ya mostrados)"
+        f"(pagina={(len(excluir) // top_n) + 1 if excluir else 1} top_n={top_n} "
+        f"pool={pool} ampliado={pool_ampliado}, "
+        f"{len(state.get('descartados') or [])} descartados, {len(excluir)} ya mostrados)"
     )
     return {
         **state,
@@ -464,6 +531,10 @@ def rag_search_node(state: AgentState) -> AgentState:
         "cv_diag": cv_diag,
         "sin_nuevos": sin_nuevos,
         "excluidos_n": len(excluir),
+        "top_n_pedido": top_n,
+        "pool_ampliado": pool_ampliado,
+        # nº de página aproximado, para que la respuesta diga en qué va
+        "pagina": (len(excluir) // top_n) + 1 if excluir else 1,
     }
 
 
@@ -514,6 +585,12 @@ def response_node(state: AgentState) -> AgentState:
     # que hacía que una búsqueda sin match perfecto terminara en "no tengo nada".
     cands = state.get("candidatos") or []
     n_cands = len(cands) or len(names)
+    # n_pedido = tamaño de la página (lo que pidió el usuario o el default).
+    # Cuando hubo pool ampliado, n_cands es el POOL (lo que hay para revisar) y
+    # n_pedido es cuántos tiene que MOSTRAR de los que cumplan el recorte.
+    n_pedido = min(state.get("top_n_pedido") or config.CANDIDATOS_TOP_N,
+                   config.CANDIDATOS_TOP_N_MAX)
+    pool_ampliado = bool(state.get("pool_ampliado")) and n_cands > n_pedido
     shortlist_block = SHORTLIST_RULES.format(n=n_cands) if n_cands else ""
     # Encaje débil: la shortlist es de tamaño fijo, así que cuando no hay gente
     # del rubro los últimos lugares se llenan con cualquier CV. search_cvs los
@@ -523,19 +600,28 @@ def response_node(state: AgentState) -> AgentState:
     n_debiles = sum(1 for c in cands if c.get("encaje_debil"))
     if n_debiles and n_debiles == len(cands):
         shortlist_block += ENCAJE_DEBIL_TODOS.format(n=n_cands)
-    elif n_debiles:
+    elif n_debiles and not pool_ampliado:
+        # Con pool ampliado no se agrega: ahí la consigna es mostrar sólo a los
+        # que cumplen el recorte, y este bloque pide listar aparte a los flojos
+        # (que en un pool de 30 son muchos y llenarían la respuesta).
         shortlist_block += ENCAJE_DEBIL_RULES.format(n_debiles=n_debiles, n=n_cands)
     # Pedido de "otros/sin repetir": o se excluyó a los ya vistos y estos son
     # nuevos de verdad, o no quedó nadie y hay que decirlo. Sin esto el modelo
     # volvía a listar a los mismos anunciándolos como "los 5 perfiles nuevos".
     if state.get("sin_nuevos"):
-        shortlist_block += NO_REPETIR_SIN_STOCK
+        shortlist_block += NO_REPETIR_SIN_STOCK.format(
+            ya=len(state.get("mostrados") or []))
     elif state.get("excluidos_n") and n_cands:
-        shortlist_block += NO_REPETIR_OK.format(n=n_cands)
+        shortlist_block += NO_REPETIR_OK.format(
+            n=n_pedido, pagina=state.get("pagina") or 2,
+            ya=state.get("excluidos_n"))
     # El usuario pidió un recorte que la búsqueda no sabe aplicar (localidad,
-    # edad, estudios, género): que no lo dé por hecho, que lo verifique CV por CV.
+    # edad, estudios, género): el filtro lo hace el modelo sobre el POOL, y
+    # muestra sólo hasta n_pedido de los que cumplan. Reemplaza la regla de
+    # "presentalos a todos" de SHORTLIST_RULES.
     if state.get("pide_recorte"):
-        shortlist_block += FILTRO_NO_APLICADO_RULES
+        shortlist_block += FILTRO_NO_APLICADO_RULES.format(
+            n_revisados=n_cands, n=n_pedido)
     # Quiénes ya se mostraron en la conversación: para que no presente como
     # novedad a alguien que el usuario ya vio.
     ya_vistos = [n for n in (state.get("mostrados_nombres") or []) if n]
@@ -558,12 +644,18 @@ def response_node(state: AgentState) -> AgentState:
         "candidato nuevo)"
         if state.get("sin_nuevos") else "(no hay ningún CV cargado que se acerque)"
     )
+    titulo_lista = (
+        f"## {n_cands} CVs para revisar ({cols}), ordenados por cercanía al "
+        f"puesto — de acá salen los que cumplan el recorte:\n"
+        if pool_ampliado else
+        f"## Shortlist: los {n_cands} candidatos más cercanos ({cols}), "
+        f"ordenados de mayor a menor:\n"
+    )
     context_prompt = (
         f"{perfil_block}"
         f"{proc_block}"
         f"{ya_block}"
-        f"## Shortlist: los {n_cands} candidatos más cercanos ({cols}), "
-        f"ordenados de mayor a menor:\n"
+        f"{titulo_lista}"
         f"{docs if docs else vacio}\n\n"
         f"## Consulta del usuario:\n{state['user_message']}\n\n"
         f"{shortlist_block}\n"

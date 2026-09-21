@@ -251,8 +251,10 @@ async def _mostrados(session_id: str, desde=None) -> tuple[list[int], list[str]]
     Se abre la metadata en SQL (LATERAL) en vez de traerla entera: son pocas
     filas, pero cada una arrastra el JSON completo de 5 candidatos.
 
-    Tope de 12 respuestas de búsqueda (≈60 candidatos, el mismo
-    nodes.MAX_EXCLUIR). Mientras no se haya tocado «Nueva conversación» el
+    Tope de config.MOSTRADOS_MAX_RESPUESTAS respuestas de búsqueda (24 ≈ 120
+    candidatos, el mismo config.MAX_EXCLUIR que usa nodes.py). Tiene que dar
+    para el paginado: si la ventana fuera más corta que MAX_EXCLUIR, en la
+    página 5 o 6 se empezarían a repetir los de la 1. Mientras no se haya tocado «Nueva conversación» el
     corte es NULL y esto barrería la sesión entera — que puede tener semanas de
     búsquedas de otros puestos, y excluirlas a todas escondería a alguien que
     para este puesto sí sirve. El LIMIT sale del índice (session_id,
@@ -266,17 +268,29 @@ async def _mostrados(session_id: str, desde=None) -> tuple[list[int], list[str]]
                   FROM agent.chat_messages m
                  WHERE m.session_id = $1
                    AND m.role = 'ai'
-                   AND jsonb_typeof(m.metadata->'candidatos') = 'array'
+                   AND (jsonb_typeof(m.metadata->'candidatos') = 'array'
+                        OR jsonb_typeof(m.metadata->'revisados') = 'array')
                    AND ($2::timestamptz IS NULL OR m.created_at >= $2)
                  ORDER BY m.created_at DESC
-                 LIMIT 12
+                 LIMIT $3
             )
-            SELECT c->>'candidato_id' AS id, c->>'nombre' AS nombre
-              FROM ultimas
-              CROSS JOIN LATERAL jsonb_array_elements(ultimas.metadata->'candidatos') c
-             ORDER BY ultimas.created_at ASC
+            SELECT id, nombre FROM (
+                SELECT c->>'candidato_id' AS id, c->>'nombre' AS nombre,
+                       u.created_at
+                  FROM ultimas u
+                  CROSS JOIN LATERAL jsonb_array_elements(
+                      COALESCE(u.metadata->'candidatos', '[]'::jsonb)) c
+                UNION ALL
+                -- `revisados`: CVs que entraron al pool ampliado y no se
+                -- mostraron. No tienen nombre (no van a la barra), pero se
+                -- excluyen igual: ya se miraron.
+                SELECT r #>> '{}' AS id, NULL AS nombre, u.created_at
+                  FROM ultimas u
+                  CROSS JOIN LATERAL jsonb_array_elements(
+                      COALESCE(u.metadata->'revisados', '[]'::jsonb)) r
+            ) t ORDER BY created_at ASC
             """,
-            session_id, desde,
+            session_id, desde, config.MOSTRADOS_MAX_RESPUESTAS,
         )
     except Exception:
         logger.exception("no pude leer los candidatos ya mostrados de %s", session_id)
@@ -741,7 +755,22 @@ async def chat(request: ChatRequest):
         candidatos = await cv_files.enriquecer_candidatos(
             db_pool, result.get("candidatos") or [], answer
         )
-        meta = json.dumps({"candidatos": candidatos}) if candidatos else None
+        # Pool ampliado (pidió un recorte que la búsqueda no aplica: género,
+        # zona, edad): se revisaron hasta RECORTE_POOL_MAX CVs pero la
+        # respuesta muestra sólo los que cumplen. La barra de CVs se queda con
+        # los que Vicki nombró; el resto va a `revisados`, que no se dibuja
+        # pero sí cuenta para el paginado —ya se miraron, no hay que volver a
+        # traerlos cuando pida "otros 5".
+        revisados: list[int] = []
+        if result.get("pool_ampliado"):
+            revisados = [c["candidato_id"] for c in candidatos if c.get("candidato_id")]
+            candidatos = [c for c in candidatos if c.get("mencionado")]
+        meta_obj: dict = {}
+        if candidatos:
+            meta_obj["candidatos"] = candidatos
+        if revisados:
+            meta_obj["revisados"] = revisados
+        meta = json.dumps(meta_obj) if meta_obj else None
         await db_pool.execute(
             "INSERT INTO agent.chat_messages (session_id, user_id, role, content, metadata) "
             "VALUES ($1, $2, $3, $4, $5::jsonb)",

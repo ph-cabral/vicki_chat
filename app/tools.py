@@ -220,7 +220,8 @@ def search_cvs(query: str, collections: list[str], k: int | None = None,
                vector: list[float] | None = None,
                descartados: list[int] | None = None,
                top_n: int | None = None,
-               excluir_ids: list[int] | None = None) -> tuple[str, list[dict]]:
+               excluir_ids: list[int] | None = None,
+               chunks_por_candidato: int | None = None) -> tuple[str, list[dict]]:
     """Búsqueda de CVs: devuelve (contexto formateado, candidatos).
 
     Los candidatos salen de los MISMOS hits que arma el contexto — no hay una
@@ -241,6 +242,11 @@ def search_cvs(query: str, collections: list[str], k: int | None = None,
     no "lo que matchea". El encaje parcial lo explica el modelo, no se filtra
     acá — ver prompts.py::SHORTLIST_RULES.
 
+    `top_n` es el tamaño de la PÁGINA: por default config.CANDIDATOS_TOP_N, o
+    la cantidad que pidió el usuario ("dame 10 perfiles"). Junto con
+    `excluir_ids` es todo el paginado: página 1 = top_n sin excluir nada,
+    página 2 = top_n excluyendo a los de la página 1, y así.
+
     `excluir_ids` son los candidatos que YA se mostraron en la conversación y
     que el usuario pidió no volver a ver ("dame otros 5", "sin repetir los
     anteriores"). Se excluyen EN QDRANT, igual que los descartados: filtrarlos
@@ -257,7 +263,11 @@ def search_cvs(query: str, collections: list[str], k: int | None = None,
     distinguirlos: todos llegaban como "los N más cercanos".
     """
     top_n = top_n or config.CANDIDATOS_TOP_N
-    por_cand = max(1, config.CV_CHUNKS_POR_CANDIDATO)
+    # `chunks_por_candidato` se baja cuando se pide un POOL grande (recorte que
+    # la búsqueda no aplica: género, zona, edad). Con 30 CVs a 3 chunks el
+    # prompt se va de tamaño y el modelo empieza a saltear candidatos; con 1
+    # chunk cada uno entra la lista entera.
+    por_cand = max(1, chunks_por_candidato or config.CV_CHUNKS_POR_CANDIDATO)
     # k cuenta CHUNKS: hay que pedir de más para que salgan top_n PERSONAS.
     k = max(k or config.TOP_K, top_n * por_cand)
     cols = [c for c in (collections or []) if c]

@@ -30,6 +30,14 @@ class AgentState(TypedDict):
     pide_recorte: Optional[bool]         # ← pidió zona/edad/estudios: la búsqueda no filtra por eso
     sin_nuevos: Optional[bool]
     excluidos_n: Optional[int]
+    # ── Paginado de la shortlist ────────────────────────────────────────────
+    # `top_n_pedido`: tamaño de página que pidió el usuario ("dame 10") o el
+    # default. `pool_ampliado`: se trajo un pool más grande porque pidió un
+    # recorte que la búsqueda no aplica (género, zona, edad). `pagina`: en qué
+    # tanda va, contando los ya mostrados.
+    top_n_pedido: Optional[int]
+    pool_ampliado: Optional[bool]
+    pagina: Optional[int]
     final_response: Optional[str]
     session_id: Optional[str]
     # ── Intent "ventas" — ver app/ventas_tools.py ──────────────────────────
