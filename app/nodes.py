@@ -33,6 +33,7 @@ from app.prompts import (
     SHORTLIST_RULES,
     SYSTEM_PROMPT,
     YA_MOSTRADOS_BLOCK,
+    GENERO_FILTRADO_RULES,
 )
 from app.tool import take_camera_snapshot
 from app.tools import (
@@ -286,9 +287,28 @@ _PIDE_RECORTE_RE = [re.compile(p) for p in (
     r"\bresiden", r"\bedad\b", r"\bmenores?\b", r"\bmayores?\b",
     r"\bsecundario\b", r"\btitulo\b", r"universitari", r"terciari",
     r"\bcarnet\b", r"registro de conducir", r"\bmovilidad\b",
-    r"disponibilidad", r"\bturno", r"\bhombres?\b", r"\bmujeres?\b",
-    r"\bchic[oa]s\b", r"\bvar[oo]nes?\b", r"femenin", r"masculin",
+    r"disponibilidad", r"\bturno",
 )]
+
+# El SEXO se trata aparte del resto de los recortes: es el único que se puede
+# deducir de un dato que ya está en la metadata (el nombre de pila), así que lo
+# aplica el código en tools.py::search_cvs y no el modelo leyendo los CVs.
+# Mientras lo hacía el modelo, la respuesta era "no hay candidatas femeninas" y
+# abajo cinco varones listados uno por uno — dos veces, con el pool chico y con
+# el pool grande. Determinístico a propósito: un recorte que el LLM puede
+# "interpretar" es un recorte que a veces no se aplica.
+_GENERO_RE = [
+    ("F", re.compile(r"\bfemenin|\bmujeres?\b|\bchicas\b|\bsenoritas?\b|"
+                     r"\bcandidatas\b|\bpostulantes mujeres\b")),
+    ("M", re.compile(r"\bmasculin|\bhombres?\b|\bvar[oo]nes?\b|\bchicos\b")),
+]
+
+
+def _genero_pedido(mensaje: str) -> str | None:
+    """"F", "M" o None. Si el mensaje nombra los dos (o ninguno), None."""
+    txt = _norm(mensaje)
+    hits = [g for g, r in _GENERO_RE if r.search(txt)]
+    return hits[0] if len(hits) == 1 else None
 
 
 def _pide_recorte(mensaje: str) -> bool:
@@ -379,6 +399,9 @@ def router_node(state: AgentState) -> AgentState:
         # búsqueda no sabe aplicar (localidad, edad, estudios, género).
         "pide_otros": _pide_otros(user_message),
         "pide_recorte": _pide_recorte(user_message),
+        # sexo pedido ("perfiles femeninos"): lo aplica el código sobre el
+        # nombre de pila, no el modelo — ver tools.py::search_cvs(sexo=...)
+        "sexo_pedido": _genero_pedido(user_message),
         # tamaño de página pedido ("dame 10", "otros 3"); None = el default
         "top_n_pedido": _cantidad_pedida(user_message),
     }
@@ -462,6 +485,12 @@ def rag_search_node(state: AgentState) -> AgentState:
     pool = min(top_n * config.RECORTE_POOL_FACTOR,
                config.RECORTE_POOL_MAX) if pool_ampliado else top_n
     por_cand = config.RECORTE_CHUNKS_POR_CANDIDATO if pool_ampliado else None
+    # RECORTE POR SEXO: no va por el pool ampliado sino por dentro de
+    # search_cvs, que descarta por nombre de pila mientras agrupa y devuelve
+    # la página ya limpia. Así el modelo no puede listar a los que no cumplen:
+    # no los tiene. `sexo_stats` es lo que revisó y descartó, para la respuesta.
+    sexo = state.get("sexo_pedido")
+    sexo_stats: dict = {}
 
     def _buscar_cvs():
         texto, cands = search_cvs(
@@ -472,6 +501,8 @@ def rag_search_node(state: AgentState) -> AgentState:
             excluir_ids=excluir,
             top_n=pool,
             chunks_por_candidato=por_cand,
+            sexo=sexo,
+            stats=sexo_stats if sexo else None,
         )
         cvs_res["texto"], cvs_res["candidatos"] = texto, cands
         return texto
@@ -509,8 +540,13 @@ def rag_search_node(state: AgentState) -> AgentState:
     # Se marca aparte para que el modelo lo diga en vez de reponer a los mismos
     # presentándolos como nuevos — ver prompts.py::NO_REPETIR_SIN_STOCK.
     sin_nuevos = bool(excluir) and not candidatos
+    # Se pidió un sexo, se descartaron CVs por nombre de pila y no quedó
+    # ninguno: la búsqueda funcionó, no hay nada que diagnosticar. Sin esto,
+    # diagnostico_cvs metía un "AVISO TÉCNICO" en el prompt y la respuesta
+    # culpaba a la ingesta de CVs.
+    sin_del_sexo = bool(sexo) and not candidatos and bool(sexo_stats.get("descartados_sexo"))
     cv_diag = ""
-    if not candidatos and not sin_nuevos:
+    if not candidatos and not sin_nuevos and not sin_del_sexo:
         cv_diag = diagnostico_cvs(state.get("collections"))
         if cv_diag:
             log.error(f"[RAG] búsqueda de CVs vacía → {cv_diag}")
@@ -519,7 +555,8 @@ def rag_search_node(state: AgentState) -> AgentState:
         f"{len(docs)} chars cvs + {len(perfil)} chars perfil + {len(proc)} chars proc "
         f"+ {len(candidatos)} candidatos "
         f"(pagina={(len(excluir) // top_n) + 1 if excluir else 1} top_n={top_n} "
-        f"pool={pool} ampliado={pool_ampliado}, "
+        f"pool={pool} ampliado={pool_ampliado} sexo={sexo or '-'} "
+        f"desc_sexo={sexo_stats.get('descartados_sexo', 0)}, "
         f"{len(state.get('descartados') or [])} descartados, {len(excluir)} ya mostrados)"
     )
     return {
@@ -530,6 +567,8 @@ def rag_search_node(state: AgentState) -> AgentState:
         "candidatos": candidatos,
         "cv_diag": cv_diag,
         "sin_nuevos": sin_nuevos,
+        "sin_del_sexo": sin_del_sexo,
+        "sexo_stats": sexo_stats,
         "excluidos_n": len(excluir),
         "top_n_pedido": top_n,
         "pool_ampliado": pool_ampliado,
@@ -622,6 +661,18 @@ def response_node(state: AgentState) -> AgentState:
     if state.get("pide_recorte"):
         shortlist_block += FILTRO_NO_APLICADO_RULES.format(
             n_revisados=n_cands, n=n_pedido)
+    # Recorte por SEXO: ya lo aplicó search_cvs sobre el nombre de pila, así
+    # que los que no cumplen no están en `docs`. Acá sólo se le cuenta al
+    # modelo qué se revisó y qué se descartó, para que no vuelva a redactar
+    # "no hay candidatas" arriba de una lista de varones.
+    if state.get("sexo_pedido"):
+        st = state.get("sexo_stats") or {}
+        shortlist_block += GENERO_FILTRADO_RULES.format(
+            etiqueta="FEMENINO" if state["sexo_pedido"] == "F" else "MASCULINO",
+            revisados=st.get("revisados", n_cands),
+            descartados=st.get("descartados_sexo", 0),
+            cumplen=st.get("cumplen", n_cands),
+        )
     # Quiénes ya se mostraron en la conversación: para que no presente como
     # novedad a alguien que el usuario ya vio.
     ya_vistos = [n for n in (state.get("mostrados_nombres") or []) if n]
@@ -639,11 +690,16 @@ def response_node(state: AgentState) -> AgentState:
         f"podés afirmar que no hay candidatos para el puesto. Es un problema de "
         f"configuración/ingesta a revisar, no un resultado de la búsqueda.\n"
     ) if diag else ""
-    vacio = (
-        "(la búsqueda excluyó a los que ya se mostraron y no quedó ningún "
-        "candidato nuevo)"
-        if state.get("sin_nuevos") else "(no hay ningún CV cargado que se acerque)"
-    )
+    if state.get("sin_nuevos"):
+        vacio = ("(la búsqueda excluyó a los que ya se mostraron y no quedó "
+                 "ningún candidato nuevo)")
+    elif state.get("sin_del_sexo"):
+        st = state.get("sexo_stats") or {}
+        vacio = (f"(se revisaron los {st.get('revisados', 0)} CVs más parecidos "
+                 f"al puesto y los {st.get('descartados_sexo', 0)} se "
+                 f"descartaron por el sexo pedido: no quedó ninguno)")
+    else:
+        vacio = "(no hay ningún CV cargado que se acerque)"
     titulo_lista = (
         f"## {n_cands} CVs para revisar ({cols}), ordenados por cercanía al "
         f"puesto — de acá salen los que cumplan el recorte:\n"

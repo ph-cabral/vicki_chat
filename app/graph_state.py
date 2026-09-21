@@ -28,6 +28,15 @@ class AgentState(TypedDict):
     mostrados_nombres: Optional[list]
     pide_otros: Optional[bool]
     pide_recorte: Optional[bool]         # ← pidió zona/edad/estudios: la búsqueda no filtra por eso
+    # ── Recorte por sexo ────────────────────────────────────────────────────
+    # `sexo_pedido` ("F"/"M"/None) lo resuelve el router por regex y lo APLICA
+    # el código en tools.py::search_cvs deduciéndolo del nombre de pila: los
+    # que no cumplen no llegan al prompt. `sexo_stats` es cuántos se revisaron
+    # y descartaron (para que la respuesta lo diga), `sin_del_sexo` marca que
+    # no quedó nadie por el recorte y NO por una falla de la búsqueda.
+    sexo_pedido: Optional[str]
+    sexo_stats: Optional[dict]
+    sin_del_sexo: Optional[bool]
     sin_nuevos: Optional[bool]
     excluidos_n: Optional[int]
     # ── Paginado de la shortlist ────────────────────────────────────────────

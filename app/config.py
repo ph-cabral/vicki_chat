@@ -107,6 +107,16 @@ class Config:
     RECORTE_POOL_FACTOR: int = int(os.getenv("RECORTE_POOL_FACTOR", "5"))
     RECORTE_POOL_MAX: int = int(os.getenv("RECORTE_POOL_MAX", "30"))
     RECORTE_CHUNKS_POR_CANDIDATO: int = int(os.getenv("RECORTE_CHUNKS_POR_CANDIDATO", "1"))
+    # ── Recorte por sexo ("perfiles femeninos") ───────────────────────────────
+    # Qdrant no tiene el sexo en el payload, así que no se puede filtrar en la
+    # consulta: se deduce del nombre de pila (app/genero.py) mientras se agrupan
+    # los hits. Para que el recorte tenga de dónde elegir hay que sobre-pedir
+    # chunks en la MISMA consulta (sube el limit, no la cantidad de consultas):
+    # si en la base 1 de cada 10 CVs es de una mujer, con el limit normal no
+    # aparece ninguna. OVERFETCH multiplica el limit y MAX lo topea para no
+    # traer media colección en cada pregunta.
+    GENERO_OVERFETCH: int = int(os.getenv("GENERO_OVERFETCH", "10"))
+    GENERO_OVERFETCH_MAX: int = int(os.getenv("GENERO_OVERFETCH_MAX", "300"))
     # ── Corte de conversación ─────────────────────────────────────────────────
     # El session_id es fijo por usuario (user_<uid>): la charla no termina
     # nunca y el modelo sigue leyendo lo que se habló días atrás. El corte lo

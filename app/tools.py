@@ -18,6 +18,7 @@ from qdrant_client import QdrantClient
 from qdrant_client import models as qm
 
 from app.config import config
+from app.genero import cumple_sexo
 
 log = logging.getLogger("tools")
 
@@ -221,7 +222,9 @@ def search_cvs(query: str, collections: list[str], k: int | None = None,
                descartados: list[int] | None = None,
                top_n: int | None = None,
                excluir_ids: list[int] | None = None,
-               chunks_por_candidato: int | None = None) -> tuple[str, list[dict]]:
+               chunks_por_candidato: int | None = None,
+               sexo: str | None = None,
+               stats: dict | None = None) -> tuple[str, list[dict]]:
     """Búsqueda de CVs: devuelve (contexto formateado, candidatos).
 
     Los candidatos salen de los MISMOS hits que arma el contexto — no hay una
@@ -270,6 +273,15 @@ def search_cvs(query: str, collections: list[str], k: int | None = None,
     por_cand = max(1, chunks_por_candidato or config.CV_CHUNKS_POR_CANDIDATO)
     # k cuenta CHUNKS: hay que pedir de más para que salgan top_n PERSONAS.
     k = max(k or config.TOP_K, top_n * por_cand)
+    # RECORTE POR SEXO ("perfiles femeninos"): no hay campo `sexo` en el
+    # payload de Qdrant, así que no se puede filtrar en la consulta. Se filtra
+    # acá, por el nombre de pila, mientras se agrupa — y para eso hay que
+    # sobre-pedir: si en la base 1 de cada 10 CVs es de una mujer, con k=15
+    # chunks no aparece ninguna y la respuesta vuelve a ser "no hay candidatas".
+    # Sigue siendo UNA sola consulta a Qdrant (mismo vector, limit más alto):
+    # lo que crece es el limit, no la cantidad de consultas ni el embedding.
+    if sexo:
+        k = min(k * config.GENERO_OVERFETCH, config.GENERO_OVERFETCH_MAX)
     cols = [c for c in (collections or []) if c]
     if not cols:
         # mismo repliegue que search_collections: si el router se quedó sin
@@ -292,11 +304,24 @@ def search_cvs(query: str, collections: list[str], k: int | None = None,
     candidatos: list[dict] = []
     vistos: dict = {}
     chunks: dict = {}  # clave → [(col, point)] (los mejores de esa persona)
+    # Recorte por sexo: `rechazados` se lleva por clave (no por chunk) para no
+    # contar tres veces a la misma persona que entró con tres chunks.
+    rechazados: dict = {}
+    confirmados: list[dict] = []      # el nombre de pila confirma el sexo pedido
+    indeterminados: list[dict] = []   # el nombre no alcanza (CV sin nombre, etc.)
     for col, p in hits:
         c = _candidato_de_hit(col, p)
         if not c:
             continue
         clave = c["candidato_id"] or c["hash_archivo"] or c["nombre_completo"].lower()
+        if clave in rechazados:
+            continue
+        if sexo:
+            ok, deducido = cumple_sexo(c["nombre_completo"], sexo)
+            if not ok:
+                rechazados[clave] = deducido
+                continue
+            c["sexo_deducido"] = deducido
         if clave in vistos:
             # mismo candidato en otro chunk: queda el mejor score y, si todavía
             # hay cupo, el chunk suma contexto (otra parte del mismo CV)
@@ -305,12 +330,45 @@ def search_cvs(query: str, collections: list[str], k: int | None = None,
             if len(chunks[clave]) < por_cand:
                 chunks[clave].append((col, p))
             continue
+        # Con recorte por sexo la página se arma en DOS baldes: primero los
+        # que el nombre confirma, y sólo si sobran lugares se rellena con los
+        # "indeterminados" (CVs sin nombre en la metadata, que son muchos:
+        # ~700 de 1800 en la colección de CVs). Sin esto, una página de 5 se
+        # llenaba de "Sin nombre" y las candidatas de verdad quedaban afuera
+        # por estar más abajo en el orden de relevancia.
+        if sexo:
+            if c.get("sexo_deducido") == sexo:
+                if len(confirmados) >= top_n:
+                    continue
+                vistos[clave] = c
+                chunks[clave] = [(col, p)]
+                confirmados.append(c)
+                continue
+            if len(indeterminados) >= top_n:
+                continue
+            vistos[clave] = c
+            chunks[clave] = [(col, p)]
+            indeterminados.append(c)
+            continue
         if len(candidatos) >= top_n:
             continue  # ya hay shortlist completa; el resto no entra al prompt
         vistos[clave] = c
         chunks[clave] = [(col, p)]
         c["posicion"] = len(candidatos) + 1
         candidatos.append(c)
+
+    if sexo:
+        # los confirmados primero, y el resto de los lugares para los que el
+        # nombre no permite decidir (van rotulados en el contexto)
+        candidatos = confirmados + indeterminados[: max(0, top_n - len(confirmados))]
+        for i, c in enumerate(candidatos, 1):
+            c["posicion"] = i
+        # los indeterminados que no entraron a la página no cuentan como
+        # revisados: no se los miró, quedaron abajo en la lista
+        for c in indeterminados[max(0, top_n - len(confirmados)):]:
+            clave = c["candidato_id"] or c["hash_archivo"] or c["nombre_completo"].lower()
+            vistos.pop(clave, None)
+            chunks.pop(clave, None)
 
     # Encaje débil: se calcula DESPUÉS del agrupado porque el score de cada
     # persona es el del MEJOR de sus chunks, y ese máximo recién se conoce al
@@ -330,8 +388,26 @@ def search_cvs(query: str, collections: list[str], k: int | None = None,
             f"por debajo del piso {piso:.2f})"
             if c["encaje_debil"] else f" (relevancia {c['score']:.2f})"
         )
+        # Con recorte por sexo se rotula de dónde sale el dato: el CV no lo
+        # dice, es una deducción por el nombre de pila. Los indeterminados
+        # entran igual y van marcados, para que la respuesta no afirme nada.
+        if sexo:
+            etiqueta += (
+                " — sexo NO DETERMINADO por el nombre (el CV no lo dice)"
+                if c.get("sexo_deducido") is None else
+                f" — nombre de pila {'femenino' if c['sexo_deducido'] == 'F' else 'masculino'}"
+                f" (deducción, el CV no lo dice)"
+            )
         partes.append(f"\n### Candidato #{c['posicion']} — {c['nombre_completo']}{etiqueta}")
         partes.extend(_format_hit(col, p) for col, p in chunks[clave])
+    if stats is not None:
+        stats.update({
+            "sexo_pedido": sexo,
+            "cumplen": len(candidatos),
+            "indeterminados": sum(1 for c in candidatos if c.get("sexo_deducido") is None),
+            "descartados_sexo": len(rechazados),
+            "revisados": len(candidatos) + len(rechazados),
+        })
     return "\n".join(partes), candidatos
 
 

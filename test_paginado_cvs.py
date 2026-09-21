@@ -112,10 +112,13 @@ for txt, esp in [
     chk(got == esp, f"{txt!r} → {got} (esperado {esp})")
 
 print("\n== recorte que la búsqueda no aplica (dispara el pool ampliado) ==")
+# El SEXO salió de esta lista: lo aplica el código por el nombre de pila
+# (genero.py + search_cvs(sexo=...)), no el pool ampliado — ver test_genero_cvs.py.
 for txt, esp in [
-    ("recomendame perfiles femeninos para deposito, wms, autoelevador", True),
-    ("dame otras 5 mujeres para deposito", True),
+    ("recomendame perfiles femeninos para deposito, wms, autoelevador", False),
+    ("dame otras 5 mujeres para deposito", False),
     ("que vivan en cordoba capital", True),
+    ("mayores de 25 con secundario completo", True),
     ("busco un operario de deposito", False),
 ]:
     got = N._pide_recorte(txt)

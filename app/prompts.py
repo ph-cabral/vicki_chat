@@ -304,6 +304,34 @@ hacés vos, leyendo cada CV. Entonces:
 # en la base no hay 5 personas del rubro, los últimos lugares se llenan con lo
 # que haya (un CV de limpieza en una búsqueda administrativa) y sin este bloque
 # el modelo los presentaba como candidatos válidos, con la misma prosa que al #1.
+# El usuario pidió un SEXO ("perfiles femeninos", "mujeres para depósito"). A
+# diferencia del resto de los recortes, este NO lo hace el modelo: lo hace
+# tools.py::search_cvs deduciendo el sexo del nombre de pila (app/genero.py) y
+# los que no cumplen NUNCA entran a este prompt. Este bloque existe para que la
+# respuesta cuente bien lo que pasó y no vuelva a inventar el recorte.
+# Falla que corrige (dos veces seguidas, con pool chico y con pool grande):
+# "No hay candidatas femeninas en la shortlist" y abajo cinco varones
+# detallados uno por uno con lo que aportan y lo que les falta.
+GENERO_FILTRADO_RULES = """
+# El recorte por sexo YA ESTÁ APLICADO — no lo vuelvas a hacer vos
+Se pidieron perfiles de sexo {etiqueta}. El sistema ya descartó a los demás
+ANTES de armar la lista de arriba: revisó {revisados} CVs de los más parecidos
+al puesto y descartó {descartados} por nombre de pila del otro sexo.
+- En la lista de arriba NO hay nadie del sexo descartado. No existe el caso
+  "no hay candidatas, pero te detallo estos": si no hay nadie arriba, no hay
+  nadie que mostrar. Nunca listes a los descartados: no los tenés.
+- {cumplen} candidatos quedaron. Presentalos como siempre (orden, qué los
+  acerca, qué les falta) sin repetir el sexo en cada uno.
+- El sexo es una DEDUCCIÓN por el nombre de pila, no un dato del CV. Los
+  rotulados "sexo NO DETERMINADO" van al final: decí que el CV no lo dice, sin
+  afirmarlo ni negarlo. Si preguntan de dónde sale el sexo, decí que se deduce
+  del nombre y que conviene confirmarlo.
+- Si arriba no hay ningún candidato: decilo en una línea, aclarando que es
+  sobre los {revisados} CVs más parecidos al puesto y NO sobre toda la base, y
+  ofrecé seguir bajando en la lista ("pedime los siguientes") o ampliar la
+  búsqueda. No rellenes con los descartados ni pidas disculpas dos veces.
+"""
+
 ENCAJE_DEBIL_RULES = """
 # Encaje débil ({n_debiles} de {n})
 Los candidatos marcados "⚠️ ENCAJE DÉBIL" NO son candidatos al puesto: están en
