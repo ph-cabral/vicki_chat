@@ -6,11 +6,13 @@ verifica:
 
 - `_cantidad_pedida`: "dame 5", "otros tres", "los siguientes 10" → tamaño de
   página; y que NO confunda "5 años de experiencia" con una cantidad.
-- `_pide_otros`: qué frases piden la página siguiente y cuáles no
-  ("contame más del segundo" NO tiene que excluir a los ya mostrados, si no
-  esconde justo a la persona por la que preguntan).
-- `rag_search_node`: top_n, pool ampliado, chunks por candidato, cuántos se
-  excluyen y en qué página va.
+- `_pide_otros`: qué frases piden la página siguiente y cuáles no.
+- `_pregunta_por_mostrado`: qué mensajes preguntan por alguien que ya está en
+  la barra de CVs ("contame más del segundo", el apellido de uno ya mostrado).
+  Es lo único que apaga la exclusión automática: si no, la búsqueda esconde
+  justo a la persona por la que preguntan.
+- `rag_search_node`: top_n, pool ampliado, chunks por candidato, la exclusión
+  SIEMPRE de los ya mostrados (pida o no "otros") y en qué página va.
 - `response_node`: qué bloques de prompt entran en cada caso.
 
 Uso:  PYTHONPATH=. python3 test_paginado_cvs.py
@@ -111,6 +113,22 @@ for txt, esp in [
     got = N._pide_otros(txt)
     chk(got == esp, f"{txt!r} → {got} (esperado {esp})")
 
+print("\n== pregunta por alguien que YA está en la barra de CVs ==")
+_YA = ["Graciela Dip", "VAUDAGNA, JOAN", "Malena Herrador"]
+for txt, esp in [
+    ("contame mas del segundo", True),
+    ("el primero como viene?", True),
+    ("ese candidato donde vive", True),
+    ("que experiencia tiene dip?", True),          # apellido ya mostrado
+    ("y herrador maneja autoelevador?", True),
+    ("mostrame perfiles femeninos para deposito", False),
+    ("algun perfil femenino para deposito?", False),
+    ("busco un operario de deposito", False),
+    ("dame otros 5", False),
+]:
+    got = N._pregunta_por_mostrado(txt, _YA)
+    chk(got == esp, f"{txt!r} → {got} (esperado {esp})")
+
 print("\n== recorte que la búsqueda no aplica (dispara el pool ampliado) ==")
 # El SEXO salió de esta lista: lo aplica el código por el nombre de pila
 # (genero.py + search_cvs(sexo=...)), no el pool ampliado — ver test_genero_cvs.py.
@@ -160,6 +178,12 @@ chk(l["top_n"] == min(config.CANDIDATOS_TOP_N * config.RECORTE_POOL_FACTOR,
     f"recorte → pool de {l['top_n']} CVs con {l['chunks']} chunk c/u")
 o, l = _rag(pide_otros=True, mostrados=list(range(5)))
 chk(l["excluir"] == 5 and o["pagina"] == 2, "pidió otros con 5 vistos → página 2")
+o, l = _rag(mostrados=list(range(5)))
+chk(l["excluir"] == 5,
+    "SIN pedir otros, con 5 en la barra → igual se excluyen (no se repiten)")
+o, l = _rag(consulta_mostrado=True, mostrados=list(range(5)))
+chk(l["excluir"] == 0,
+    "pregunta por uno ya mostrado → NO se excluye (si no lo esconde)")
 o, l = _rag(pide_otros=True, mostrados=list(range(15)))
 chk(o["pagina"] == 4, "15 vistos de a 5 → página 4")
 o, l = _rag(pide_otros=True, pide_recorte=True, mostrados=list(range(5)))
@@ -200,11 +224,20 @@ t = _prompt(pide_recorte=True, pool_ampliado=True,
             candidatos=[_cand(i) for i in range(1, 26)])
 chk("25 CVs para revisar" in t and "hasta 5 que CUMPLAN" in t,
     "recorte → 25 CVs para revisar, mostrar hasta 5 que cumplan")
-t = _prompt(excluidos_n=5, pagina=2, candidatos=[_cand(i) for i in range(6, 11)])
-chk("Página 2" in t, "página 2 → el prompt dice en qué página va")
-t = _prompt(sin_nuevos=True, excluidos_n=10, mostrados=list(range(10)), candidatos=[])
+t = _prompt(pide_otros=True, excluidos_n=5, pagina=2,
+            candidatos=[_cand(i) for i in range(6, 11)])
+chk("Página 2" in t, "pidió otros → el prompt dice en qué página va")
+t = _prompt(excluidos_n=5, candidatos=[_cand(i) for i in range(6, 11)])
+chk("barra de CVs" in t and "Página" not in t,
+    "exclusión automática → dice que los anteriores están en la barra")
+t = _prompt(pide_otros=True, sin_nuevos=True, excluidos_n=10,
+            mostrados=list(range(10)), candidatos=[])
 chk("NO QUEDAN CANDIDATOS NUEVOS" in t, "sin stock nuevo → lo dice primero")
-t = _prompt(pide_recorte=True, pool_ampliado=True, excluidos_n=5, pagina=2,
+t = _prompt(sin_nuevos=True, excluidos_n=10, mostrados=list(range(10)), candidatos=[])
+chk("NO HAY CANDIDATOS NUEVOS" in t and "ya los tiene" in t.lower(),
+    "sin stock sin haber pedido otros → los que hay ya están a la derecha")
+t = _prompt(pide_recorte=True, pool_ampliado=True, pide_otros=True,
+            excluidos_n=5, pagina=2,
             top_n_pedido=3, candidatos=[_cand(i) for i in range(6, 21)])
 chk("hasta 3 que CUMPLAN" in t and "Página 2" in t,
     "recorte + página 2 + cantidad pedida")

@@ -21,12 +21,17 @@ class AgentState(TypedDict):
     descartados: Optional[list]          # ← candidato_id tirados al tacho en esta conversación
     # ── No repetir candidatos ───────────────────────────────────────────────
     # `mostrados` son los candidato_id que ya se le mostraron al usuario en
-    # esta conversación (salen de agent.chat_messages.metadata, ver main.py).
-    # Se excluyen en Qdrant SOLO cuando pide gente distinta (`pide_otros`);
+    # esta conversación (salen de agent.chat_messages.metadata, ver main.py) —
+    # los mismos que está viendo en la barra de CVs. Se excluyen en Qdrant
+    # SIEMPRE, pida o no gente distinta: lo que ya está a la vista no se
+    # vuelve a recomendar. `consulta_mostrado` es la única excepción (el
+    # mensaje pregunta por alguno de ellos); `pide_otros` ya no decide la
+    # exclusión, sólo cómo se redacta (paginado vs. exclusión automática).
     # `sin_nuevos` marca que se excluyeron y no quedó nadie más cargado.
     mostrados: Optional[list]
     mostrados_nombres: Optional[list]
     pide_otros: Optional[bool]
+    consulta_mostrado: Optional[bool]
     pide_recorte: Optional[bool]         # ← pidió zona/edad/estudios: la búsqueda no filtra por eso
     # ── Recorte por sexo ────────────────────────────────────────────────────
     # `sexo_pedido` ("F"/"M"/None) lo resuelve el router por regex y lo APLICA

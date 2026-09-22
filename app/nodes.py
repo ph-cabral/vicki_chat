@@ -31,7 +31,9 @@ from app.prompts import (
     PROC_RESPONSE_PROMPT,
     ROUTER_PROMPT,
     SHORTLIST_RULES,
+    SIN_NUEVOS_EN_BARRA,
     SYSTEM_PROMPT,
+    YA_EN_BARRA_OK,
     YA_MOSTRADOS_BLOCK,
     GENERO_FILTRADO_RULES,
 )
@@ -47,7 +49,7 @@ from app.tools import (
 
 log = logging.getLogger("nodes")
 
-# Tope de candidatos a excluir por pedido de "otros": un must_not con cientos
+# Tope de candidatos ya mostrados a excluir: un must_not con cientos
 # de ids encarece la búsqueda y, pasados unos cuantos, ya no queda nadie nuevo.
 # Es el techo del paginado (con páginas de 5, MAX_EXCLUIR=120 son 24 páginas).
 MAX_EXCLUIR = config.MAX_EXCLUIR
@@ -238,6 +240,51 @@ def _pide_otros(mensaje: str) -> bool:
     return any(r.search(txt) for r in _PIDE_OTROS_RE)
 
 
+# Preguntas SOBRE alguien que YA se mostró ("contame más del segundo", "qué
+# experiencia tiene Dip", "ese candidato dónde vive"). Es la ÚNICA excepción a
+# la exclusión automática de los ya mostrados: si se los excluyera de Qdrant,
+# la búsqueda escondería justo a la persona por la que se pregunta.
+_PREGUNTA_MOSTRADO_RE = [re.compile(p) for p in (
+    r"\b(el|la|los|las)\s+(primer[oa]s?|segund[oa]s?|tercer[oa]s?|cuart[oa]s?|"
+    r"quint[oa]s?|sext[oa]s?|ultim[oa]s?)\b",
+    r"\b(ese|esa|este|esta|aquel|aquella)\s+"
+    r"(candidat|perfil|cv|postulante|persona|chic|muchach)",
+    r"\bcontame mas\b", r"\bcontame de\b", r"\bampliame\b", r"\bampliar sobre\b",
+    r"\bmas datos de\b", r"\bmas informacion de\b", r"\bdetalle de\b",
+    r"\bdel anterior\b", r"\bde los anteriores\b",
+)]
+
+# Partículas de apellidos compuestos ("De la Vega", "San Martín"): salen de los
+# nombres ya mostrados pero aparecen en cualquier frase, así que no alcanzan
+# para decir que el mensaje nombra a alguien.
+_TOKEN_NO_IDENTIFICA = {
+    "de", "del", "la", "las", "los", "el", "san", "santa", "don", "dona",
+    "van", "von", "der", "da", "do", "dos", "y", "mac", "mc",
+}
+
+
+def _pregunta_por_mostrado(mensaje: str, nombres: list | None = None) -> bool:
+    """¿El mensaje pregunta por alguien que YA está en la barra de CVs?
+
+    Dos señales: la forma de la pregunta (ordinales, "ese candidato", "contame
+    más de…") o que nombre a alguno de los ya mostrados. Con cualquiera de las
+    dos NO se excluyen los ya vistos de la búsqueda — ver rag_search_node.
+    """
+    txt = _norm(mensaje)
+    if any(r.search(txt) for r in _PREGUNTA_MOSTRADO_RE):
+        return True
+    for n in (nombres or []):
+        # apellido o nombre de pila de alguien ya mostrado, como palabra
+        # ENTERA (así "ana" no engancha adentro de "semana"). Desde 3 letras
+        # porque hay apellidos cortos reales en la base (Dip, Paz, Roa), menos
+        # las partículas de los compuestos.
+        for tok in _norm(n).replace(",", " ").split():
+            if (len(tok) >= 3 and tok not in _TOKEN_NO_IDENTIFICA
+                    and re.search(rf"\b{re.escape(tok)}\b", txt)):
+                return True
+    return False
+
+
 # Cuántos candidatos pidió ("dame 10 perfiles", "otros 3", "los siguientes
 # cinco"). Determinístico, igual que _pide_otros: define el tamaño de la
 # página, y si lo decidiera el LLM el paginado dejaría de ser reproducible.
@@ -399,6 +446,10 @@ def router_node(state: AgentState) -> AgentState:
         # búsqueda no sabe aplicar (localidad, edad, estudios, género).
         "pide_otros": _pide_otros(user_message),
         "pide_recorte": _pide_recorte(user_message),
+        # ¿pregunta por alguien que ya está en la barra de CVs? Es lo único que
+        # apaga la exclusión automática de los ya mostrados (ver rag_search_node)
+        "consulta_mostrado": _pregunta_por_mostrado(
+            user_message, state.get("mostrados_nombres")),
         # sexo pedido ("perfiles femeninos"): lo aplica el código sobre el
         # nombre de pila, no el modelo — ver tools.py::search_cvs(sexo=...)
         "sexo_pedido": _genero_pedido(user_message),
@@ -461,13 +512,21 @@ def rag_search_node(state: AgentState) -> AgentState:
     # tiró al tacho en esta conversación: se excluyen en Qdrant.
     cvs_res: dict = {"texto": "", "candidatos": []}
 
-    # "dame otros 5", "sin repetir los que me pasaste": se excluyen EN QDRANT
-    # los candidatos que ya se mostraron en esta conversación. Sin esto la
-    # búsqueda devolvía siempre el mismo top-5 por más que el usuario lo
-    # pidiera distinto (en una charla real, el mismo CV apareció en 5 de 11
-    # respuestas seguidas). Se acota a los últimos MAX_EXCLUIR para no armar un
-    # must_not gigante en una conversación larga.
-    excluir = (state.get("mostrados") or [])[-MAX_EXCLUIR:] if state.get("pide_otros") else []
+    # Los candidatos que YA se mostraron en esta conversación se excluyen EN
+    # QDRANT, SIEMPRE — no hace falta que el usuario pida "otros". Están a la
+    # vista en la barra de CVs de la derecha, así que volver a listarlos no le
+    # agrega nada al reclutador: la respuesta ocupa cinco lugares con gente que
+    # ya tiene en pantalla. Caso real: dos pedidos seguidos de "perfiles
+    # femeninos para depósito" devolvieron exactamente las mismas 5 personas.
+    # La barra de CVs y esta lista de exclusión son el MISMO conjunto (salen de
+    # la misma metadata, ver main.py::_mostrados), así que la regla se lee
+    # derecho: lo que está a la derecha no vuelve a la respuesta.
+    # Única excepción: si el mensaje pregunta por alguien ya mostrado,
+    # excluirlo escondería justo a esa persona.
+    # Se acota a los últimos MAX_EXCLUIR para no armar un must_not gigante en
+    # una conversación larga; «Nueva conversación» lo limpia todo.
+    excluir = ([] if state.get("consulta_mostrado")
+               else (state.get("mostrados") or [])[-MAX_EXCLUIR:])
 
     # Tamaño de la PÁGINA: lo que pidió el usuario ("dame 10") o el default.
     top_n = min(state.get("top_n_pedido") or config.CANDIDATOS_TOP_N,
@@ -647,13 +706,22 @@ def response_node(state: AgentState) -> AgentState:
     # Pedido de "otros/sin repetir": o se excluyó a los ya vistos y estos son
     # nuevos de verdad, o no quedó nadie y hay que decirlo. Sin esto el modelo
     # volvía a listar a los mismos anunciándolos como "los 5 perfiles nuevos".
+    # Dos redacciones distintas según CÓMO se excluyó a los ya vistos: si el
+    # usuario pidió "otros" es un paginado (página N), y si la exclusión fue
+    # automática hay que decir que los anteriores siguen a la vista en la barra
+    # de CVs, no que "se buscaron otros".
+    pidio_otros = bool(state.get("pide_otros"))
     if state.get("sin_nuevos"):
-        shortlist_block += NO_REPETIR_SIN_STOCK.format(
-            ya=len(state.get("mostrados") or []))
+        ya = state.get("excluidos_n") or len(state.get("mostrados") or [])
+        shortlist_block += (NO_REPETIR_SIN_STOCK if pidio_otros
+                            else SIN_NUEVOS_EN_BARRA).format(ya=ya)
     elif state.get("excluidos_n") and n_cands:
-        shortlist_block += NO_REPETIR_OK.format(
-            n=n_pedido, pagina=state.get("pagina") or 2,
-            ya=state.get("excluidos_n"))
+        shortlist_block += (
+            NO_REPETIR_OK.format(n=n_pedido, pagina=state.get("pagina") or 2,
+                                 ya=state.get("excluidos_n"))
+            if pidio_otros else
+            YA_EN_BARRA_OK.format(n=n_cands, ya=state.get("excluidos_n"))
+        )
     # El usuario pidió un recorte que la búsqueda no sabe aplicar (localidad,
     # edad, estudios, género): el filtro lo hace el modelo sobre el POOL, y
     # muestra sólo hasta n_pedido de los que cumplan. Reemplaza la regla de

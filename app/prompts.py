@@ -387,13 +387,48 @@ que se acerque a ese puesto.
   o publicar la búsqueda porque no hay más CVs cargados.
 """
 
+# EXCLUSIÓN AUTOMÁTICA: los ya mostrados quedan fuera de la búsqueda aunque el
+# usuario no haya pedido "otros" (nodes.py::rag_search_node). Están a la vista
+# en la barra de CVs de la derecha, así que repetirlos ocupa lugares de la
+# respuesta con gente que el reclutador ya tiene en pantalla. Falla que
+# corrige: dos pedidos seguidos de "perfiles femeninos para depósito"
+# devolvieron exactamente las mismas 5 personas, una respuesta atrás de la otra.
+YA_EN_BARRA_OK = """
+# Los {ya} que ya mostraste quedaron FUERA de esta búsqueda
+Siguen a la vista en la barra de CVs, a la derecha de la pantalla: el
+reclutador ya los tiene, no hay que volver a presentarlos ni nombrarlos uno por
+uno. Los {n} de arriba son gente que todavía no vio, así que ninguno está
+repetido: podés decirlo en una línea.
+Al estar excluidos los de antes, estos suelen encajar menos: sé claro con
+cuánto se alejan del puesto.
+Si quería volver sobre alguno de los anteriores, que lo nombre y lo buscamos.
+"""
+
+# Misma exclusión automática, pero no quedó NADIE nuevo. No es una falla de la
+# búsqueda ni "no hay gente cargada": es que ya se mostró todo lo que se acerca.
+SIN_NUEVOS_EN_BARRA = """
+# NO HAY CANDIDATOS NUEVOS PARA MOSTRAR (decilo primero, en una línea)
+Los {ya} que ya le mostraste quedaron fuera de esta búsqueda —siguen a la vista
+en la barra de CVs, a la derecha— y no apareció nadie más cargado que se
+acerque al puesto.
+- Arrancá diciendo exactamente eso: no hay CVs nuevos, los que hay ya los tiene
+  a la derecha.
+- NO los vuelvas a listar uno por uno: ya están en pantalla. Si hace falta,
+  nombralos en una sola línea.
+- Cerrá con qué se puede hacer: ampliar el puesto o el rubro, buscar otra zona,
+  o publicar la búsqueda porque no hay más CVs cargados.
+"""
+
 # Lista de los que YA se mostraron en la conversación. Se inyecta siempre que
-# haya alguno, aunque no se hayan excluido: sirve para que el modelo no anuncie
-# como novedad a alguien que el usuario ya vio. {nombres}
+# haya alguno: son exactamente los que el usuario está viendo en la barra de
+# CVs, así que no van repetidos en la respuesta. {nombres}
 YA_MOSTRADOS_BLOCK = """
-# Candidatos que YA le mostraste en esta conversación
+# Candidatos que YA le mostraste (están a la vista en la barra de CVs, a la derecha)
 {nombres}
-Si alguno vuelve a aparecer arriba, no lo presentes como nuevo: aclaralo.
+Ya los tiene en pantalla: NO los vuelvas a presentar como recomendados ni los
+listes de nuevo con lo que aportan y lo que les falta. Nombralos sólo si te
+preguntan puntualmente por alguno, o en UNA línea para recordar que ya están a
+la derecha.
 """
 
 # {names} = candidatos realmente presentes en los CVs recuperados (nombres exactos).
